@@ -551,18 +551,36 @@ public final class PrinterCommand {
             // Try to match Litematica's active placement for this file
             // so the anchor aligns with where the user placed it.
             String loadedFile = file.getFileName().toString();
+            boolean matchedPlacement = false;
             List<LitematicaDetector.DetectedPlacement> placements =
                     SchematicPrinter.detectAllPlacements();
             for (LitematicaDetector.DetectedPlacement p : placements) {
                 if (p.schematicPath().getFileName().toString().equals(loadedFile)) {
+                    // Sanity-check: warn if the Litematica placement origin
+                    // is at (0,0,0) — almost always means the user forgot to
+                    // move the placement to their build site.
+                    if (p.originX() == 0 && p.originY() == 0 && p.originZ() == 0) {
+                        ChatHelper.info("§e⚠ Litematica placement origin is (0, 0, 0)"
+                                + " — did you move it to the build site?");
+                        ChatHelper.info("§7The anchor will use your current position instead."
+                                + " If this is wrong, move the placement in Litematica"
+                                + " and run §f/printer load §7again.");
+                        break; // Don't use the (0,0,0) origin — keep player position
+                    }
                     anchor = new BlockPos(
                             p.originX() + printer.getSchematic().getOriginOffsetX(),
                             p.originY() + printer.getSchematic().getOriginOffsetY(),
                             p.originZ() + printer.getSchematic().getOriginOffsetZ());
                     printer.setAnchor(anchor);
+                    matchedPlacement = true;
                     ChatHelper.info("§aMatched Litematica placement.");
                     break;
                 }
+            }
+
+            if (!matchedPlacement) {
+                ChatHelper.info("§7No Litematica placement found — anchored at your position."
+                        + " Use §f/printer here§7 to re-anchor.");
             }
 
             ChatHelper.info("§aLoaded §f" + printer.getSchematic().getName()

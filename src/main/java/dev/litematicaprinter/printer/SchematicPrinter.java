@@ -268,6 +268,7 @@ public class SchematicPrinter {
             ChatHelper.info("Printing §a" + schematic.getName()
                     + "§f (" + schematic.getTotalNonAir() + " blocks)");
             ChatHelper.info("Anchor: §e" + anchor.getX() + " " + anchor.getY() + " " + anchor.getZ());
+            warnIfAnchorSuspicious();
             if (autoBuild) {
                 ChatHelper.info("§bAutoBuild §aenabled §7— walk + restock is automatic.");
             }
@@ -316,9 +317,48 @@ public class SchematicPrinter {
     // ═══════════════════════════════════════════════════════════════════
 
     public boolean tryAutoDetect() {
-        LitematicaDetector.DetectedPlacement placement = LitematicaDetector.detectFirst();
-        if (placement == null) return false;
+        List<LitematicaDetector.DetectedPlacement> placements =
+                LitematicaDetector.detectPlacements();
+        if (placements.isEmpty()) return false;
 
+        MinecraftClient mc = MinecraftClient.getInstance();
+        BlockPos playerPos = mc.player != null ? mc.player.getBlockPos() : BlockPos.ORIGIN;
+
+        // Pick the closest placement to the player, but skip any with
+        // origin (0,0,0) that is far from the player — that's almost
+        // always an un-moved default Litematica placement.
+        LitematicaDetector.DetectedPlacement best = null;
+        double bestDist = Double.MAX_VALUE;
+        for (LitematicaDetector.DetectedPlacement p : placements) {
+            boolean originIsZero = p.originX() == 0 && p.originY() == 0 && p.originZ() == 0;
+            double dx = p.originX() - playerPos.getX();
+            double dz = p.originZ() - playerPos.getZ();
+            double dist = Math.sqrt(dx * dx + dz * dz);
+
+            // Skip default-origin placements if the player is far from spawn
+            if (originIsZero && dist > 100) {
+                LOGGER.warn("Skipping placement '{}' — origin is (0,0,0) and player is {} blocks away",
+                        p.name(), (int) dist);
+                continue;
+            }
+            if (dist < bestDist) {
+                bestDist = dist;
+                best = p;
+            }
+        }
+
+        if (best == null) {
+            // All placements were skipped (origin-zero, far from player)
+            if (!placements.isEmpty()) {
+                ChatHelper.info("§e⚠ Found §f" + placements.size()
+                        + "§e Litematica placement(s), but all appear to be at world origin."
+                        + "\n§7Move your placement in Litematica to the build site,"
+                        + " or use §f/printer load <file>§7 and §f/printer here§7.");
+            }
+            return false;
+        }
+
+        LitematicaDetector.DetectedPlacement placement = best;
         try {
             this.schematic = LitematicaSchematic.load(placement.schematicPath());
             // Litematica's placement origin refers to the schematic's original
@@ -333,9 +373,9 @@ public class SchematicPrinter {
             this.blocksPlaced = 0;
             this.schematicFile = placement.schematicPath().getFileName().toString();
             this.autoDetected = true;
-            MinecraftClient mc = MinecraftClient.getInstance();
             this.buildDimension = mc.world != null ? mc.world.getRegistryKey() : null;
             PrinterDatabase.dumpBuildData(); // clear stale scaffold + snapshots from previous build
+            warnIfAnchorSuspicious();
             return true;
         } catch (IOException e) {
             ChatHelper.info("§cFailed to load detected schematic: " + e.getMessage());
@@ -361,6 +401,20 @@ public class SchematicPrinter {
         for (LitematicaDetector.DetectedPlacement p : placements) {
             String placementFile = p.schematicPath().getFileName().toString();
             if (!placementFile.equals(schematicFile)) continue;
+
+            // Don't sync to a (0,0,0) origin if the player is far from it —
+            // that's almost certainly an un-moved default placement.
+            if (p.originX() == 0 && p.originY() == 0 && p.originZ() == 0) {
+                MinecraftClient mc = MinecraftClient.getInstance();
+                if (mc.player != null) {
+                    double dx = p.originX() - mc.player.getX();
+                    double dz = p.originZ() - mc.player.getZ();
+                    if (Math.sqrt(dx * dx + dz * dz) > 100) {
+                        LOGGER.warn("Ignoring anchor sync — placement origin is (0,0,0) and player is far away");
+                        return false;
+                    }
+                }
+            }
 
             BlockPos newAnchor = new BlockPos(
                     p.originX() + schematic.getOriginOffsetX(),
@@ -391,6 +445,40 @@ public class SchematicPrinter {
             }
         }
         return false;
+    }
+
+    /**
+     * Warn the player if the current anchor looks suspicious — e.g. very
+     * far from the player or sitting at world origin (0, y, 0), which is
+     * almost always an un-moved default Litematica placement.
+     */
+    private void warnIfAnchorSuspicious() {
+        if (anchor == null) return;
+        MinecraftClient mc = MinecraftClient.getInstance();
+        if (mc.player == null) return;
+
+        BlockPos playerPos = mc.player.getBlockPos();
+
+        // Check for origin-zero anchor (common Litematica default)
+        if (anchor.getX() == 0 && anchor.getZ() == 0) {
+            ChatHelper.info("§e\u26A0 Anchor is at world origin (0, "
+                    + anchor.getY() + ", 0) — this is usually a default"
+                    + " Litematica placement that wasn't moved.");
+            ChatHelper.info("§7If this is wrong, move the placement in"
+                    + " Litematica or use §f/printer here§7 at the build site.");
+            return;
+        }
+
+        // Check horizontal distance from player to anchor
+        double dx = anchor.getX() - playerPos.getX();
+        double dz = anchor.getZ() - playerPos.getZ();
+        double horizDist = Math.sqrt(dx * dx + dz * dz);
+        if (horizDist > 500) {
+            ChatHelper.info("§e\u26A0 Build site is §f" + (int) horizDist
+                    + "§e blocks away! This may be a mis-positioned placement.");
+            ChatHelper.info("§7Use §f/printer here§7 to re-anchor at your"
+                    + " position, or verify in Litematica.");
+        }
     }
 
     public static List<LitematicaDetector.DetectedPlacement> detectAllPlacements() {
@@ -574,7 +662,11 @@ public class SchematicPrinter {
             walkFailCount = 0;
             triedPlacementWalk = false;
             stuckCycles = 0;
-            restockFailures = 0;
+            // NOTE: do NOT reset restockFailures here — placing a block we
+            // already had materials for doesn't mean the supply chests have
+            // the items we're still missing.  Resetting here causes an
+            // infinite restock loop (place some → restock fail → reset → repeat).
+            // restockFailures only resets on *successful* restock (got items).
             lastWalkTargetZone = null; // zone was productive — allow re-targeting
             return;
         }

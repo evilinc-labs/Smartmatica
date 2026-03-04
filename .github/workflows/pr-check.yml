@@ -32,10 +32,10 @@ jobs:
       - name: Grant execute permission
         run: chmod +x gradlew
 
-      - name: Build all versions
+      - name: Clean & build all versions
         id: build
         run: |
-          ./gradlew buildAndCollect --no-daemon 2>&1 | tee build.log
+          ./gradlew clean buildAndCollect --no-daemon 2>&1 | tee build.log
           echo "status=${PIPESTATUS[0]}" >> "$GITHUB_OUTPUT"
 
       - name: Summarize build
