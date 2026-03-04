@@ -562,7 +562,17 @@ public class SchematicPrinter {
             }
         }
 
-        PlacementEngine.setBps(bps);
+        // In manual mode, use silent rotation to avoid camera jerk and
+        // conflicting rotation states that cause server rubberbanding.
+        // Also cap BPS to 4 — manual mode shares the connection with the
+        // player's own interactions so a lower budget is safer.
+        if (autoBuild) {
+            PlacementEngine.setBps(bps);
+            PlacementEngine.setSilentRotation(false);
+        } else {
+            PlacementEngine.setBps(Math.min(bps, 4));
+            PlacementEngine.setSilentRotation(true);
+        }
 
         // ── Periodic maintenance (every ~200 ticks ≈ 10 s) ───────────
         if (mc.world.getTime() % 200 == 0) {

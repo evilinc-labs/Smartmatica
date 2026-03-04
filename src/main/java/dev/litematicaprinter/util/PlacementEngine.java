@@ -113,6 +113,18 @@ public final class PlacementEngine {
     /** Max rotation speed per tick (degrees). */
     private static final float MAX_TURN_SPEED = 30.0f;
 
+    // ── silent rotation (manual mode) ────────────────────────────────────
+    /**
+     * When {@code true}, rotation packets are sent to the server without
+     * visually modifying the client-side player entity yaw/pitch.  This
+     * prevents camera-jerk and conflicting rotation states that cause
+     * server-side rubberbanding in manual (AutoBuild OFF) mode.
+     */
+    private static boolean silentRotation = false;
+
+    public static void setSilentRotation(boolean value) { silentRotation = value; }
+    public static boolean isSilentRotation() { return silentRotation; }
+
     // ── rate limiter ────────────────────────────────────────────────────
 
     private static final Random JITTER_RNG = new Random();
@@ -246,7 +258,22 @@ public final class PlacementEngine {
 
         rotateTicks++;
 
-        // Smoothly interpolate yaw/pitch
+        if (silentRotation) {
+            // ── Silent mode (manual placement): ────────────────────────
+            // Send the target rotation to the server without changing the
+            // client-side entity yaw/pitch.  The player's camera stays
+            // where they left it — no visual jerk, no conflicting state.
+            sendSilentLookPacket(mc.player, targetYaw, targetPitch);
+
+            if (pendingNeedsSneak) {
+                pressSneakPacket(mc.player);
+            }
+
+            phase = PlacePhase.PLACING;
+            return false;
+        }
+
+        // ── Normal mode (auto-build): smooth interpolation ─────────────
         float currentYaw = mc.player.getYaw();
         float currentPitch = mc.player.getPitch();
 
@@ -314,7 +341,11 @@ public final class PlacementEngine {
                             releaseSneakPacket();
                         }
                     }
-                    restoreLook(player);
+                    if (!silentRotation) {
+                        restoreLook(player);
+                    } else {
+                        sendSilentLookPacket(player, player.getYaw(), player.getPitch());
+                    }
                     phase = PlacePhase.IDLE;
                     pendingTarget = null;
                     pendingDesired = null;
@@ -324,6 +355,12 @@ public final class PlacementEngine {
         }
 
         Vec3d eyePos = player.getEyePos();
+
+        // In silent-rotation mode the entity yaw/pitch is the player's
+        // real look direction (unchanged), so use the stored target
+        // angles for the ray-face hit computation instead.
+        float placeYaw   = silentRotation ? targetYaw   : player.getYaw();
+        float placePitch  = silentRotation ? targetPitch : player.getPitch();
 
         BlockHitResult hitResult;
         if (pendingAirPlace) {
@@ -336,7 +373,7 @@ public final class PlacementEngine {
             // Normal placement: click the neighbour block's face
             BlockPos neighbor = pendingTarget.offset(pendingFace);
             Direction clickSide = pendingFace.getOpposite();
-            Vec3d hitPos = computeRayFaceHit(eyePos, player.getYaw(), player.getPitch(),
+            Vec3d hitPos = computeRayFaceHit(eyePos, placeYaw, placePitch,
                                               neighbor, clickSide, mc.world);
             // Adjust hit for half-placement (stairs/slabs/trapdoors).
             hitPos = adjustHitForHalf(hitPos, neighbor, clickSide, pendingDesired);
@@ -345,6 +382,13 @@ public final class PlacementEngine {
             hitPos = adjustHitForDoorHinge(hitPos, neighbor, pendingDesired);
 
             hitResult = new BlockHitResult(hitPos, clickSide, neighbor, false);
+        }
+
+        // In silent-rotation mode, re-send the server-side look just
+        // before the interact packet so the server's view of the player
+        // rotation matches the placement direction on the same tick.
+        if (silentRotation) {
+            sendSilentLookPacket(player, placeYaw, placePitch);
         }
 
         // Interact
@@ -382,8 +426,14 @@ public final class PlacementEngine {
         if (pendingNeedsSneak) {
             phase = PlacePhase.FINISHING;
         } else {
-            // Restore look direction
-            restoreLook(player);
+            // Restore look direction (skip in silent mode — camera was never moved)
+            if (!silentRotation) {
+                restoreLook(player);
+            } else {
+                // Send the player's real rotation back to the server so
+                // subsequent movement packets are consistent.
+                sendSilentLookPacket(player, player.getYaw(), player.getPitch());
+            }
             phase = PlacePhase.IDLE;
             pendingTarget = null;
             pendingItem = null;
@@ -406,7 +456,12 @@ public final class PlacementEngine {
             } else {
                 releaseSneakPacket();
             }
-            restoreLook(mc.player);
+            if (!silentRotation) {
+                restoreLook(mc.player);
+            } else {
+                // Resync the server with the player's real rotation.
+                sendSilentLookPacket(mc.player, mc.player.getYaw(), mc.player.getPitch());
+            }
         }
         phase = PlacePhase.IDLE;
         pendingTarget = null;
@@ -875,6 +930,25 @@ public final class PlacementEngine {
     // ═══════════════════════════════════════════════════════════════════
     //  LOOK PACKET (keeps server rotation in sync with client)
     // ═══════════════════════════════════════════════════════════════════
+
+    /**
+     * Sends a look-only movement packet to the server <b>without</b>
+     * modifying the client-side entity rotation.  Used in silent-rotation
+     * mode so the server sees the intended look direction while the
+     * player's camera remains untouched.
+     */
+    private static void sendSilentLookPacket(ClientPlayerEntity player, float yaw, float pitch) {
+        pitch = MathHelper.clamp(pitch, -90.0f, 90.0f);
+        /*? if >=1.21.4 {*//*
+        player.networkHandler.sendPacket(
+                new PlayerMoveC2SPacket.LookAndOnGround(yaw, pitch,
+                        player.isOnGround(), player.horizontalCollision));
+        *//*?} else {*/
+        player.networkHandler.sendPacket(
+                new PlayerMoveC2SPacket.LookAndOnGround(yaw, pitch,
+                        player.isOnGround()));
+        /*?}*/
+    }
 
     /**
      * Sets the entity yaw/pitch AND sends a look-only movement packet so
