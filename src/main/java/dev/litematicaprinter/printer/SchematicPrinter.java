@@ -90,7 +90,7 @@ public class SchematicPrinter {
 
     // ── settings ────────────────────────────────────────────────────
 
-    private int bps = 8;
+    private int bps = 4;
     private double range = 4.2;
     private boolean swapItems = true;
     private boolean printInAir = true;
@@ -269,7 +269,7 @@ public class SchematicPrinter {
                     + "§f (" + schematic.getTotalNonAir() + " blocks)");
             ChatHelper.info("Anchor: §e" + anchor.getX() + " " + anchor.getY() + " " + anchor.getZ());
             warnIfAnchorSuspicious();
-            if (autoBuild) {
+            if (autoBuild) { 
                 ChatHelper.info("§bAutoBuild §aenabled §7— walk + restock is automatic.");
             }
         }
