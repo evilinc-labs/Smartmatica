@@ -44,19 +44,19 @@ import java.util.Set;
 /**
  * Core automation engine for block placement tasks.
  *
- * <p>Uses a multi-tick pipeline to comply with anticheat placement validation:
- * <ol>
- *   <li><b>Tick 1 (ROTATE):</b> select item, find face, rotate player toward
- *       the hit position, start sneaking if the neighbour is interactive.</li>
- *   <li><b>Tick 2 (PLACE):</b> verify rotation has converged, build a proper
- *       ray-face hit result from the player's eye along the look vector, and
- *       send the interact-block packet.</li>
- *   <li><b>Tick 3 (FINISH):</b> release sneak if it was pressed.</li>
- * </ol>
+ * For solid-block placement the entire sequence (rotation, sneaking,
+ * offhand-swap interaction, unsneaking, rotation restore) is collapsed
+ * into a <b>single game tick</b>.  GrimAC validates that rotation and
+ * interaction packets arrive on the same server tick — spreading them
+ * across ticks triggers false-positive ghost-blocking.
  *
- * <p>Designed to stay under server placement-rate limits (default 8 BPS,
- * safely under the 9 BPS policy) and pass GrimAC RotationPlace /
- * FabricatedPlace / FarPlace / BadPackets checks.
+ * Liquid placement (buckets) and self-correction (block breaking)
+ * still use a multi-tick pipeline because they depend on client state
+ * that must persist across ticks.
+ *
+ * Designed to stay under server placement-rate limits (default 4 BPS,
+ * conservatively under GrimAC's 9-per-325 ms budget) and pass GrimAC
+ * RotationPlace / FabricatedPlace / FarPlace / BadPackets checks.
  */
 public final class PlacementEngine {
 
@@ -281,23 +281,78 @@ public final class PlacementEngine {
     }
 
     // ═══════════════════════════════════════════════════════════════════
-    //  MULTI-TICK PIPELINE
+    //  PLACEMENT PIPELINE
     // ═══════════════════════════════════════════════════════════════════
 
     /**
      * Tick the placement pipeline.  Must be called every client tick while
      * the printer is active.
      *
+     * <p>For non-liquid block placements the entire rotate → place → finish
+     * sequence is collapsed into a <b>single tick</b> so that the server
+     * receives the rotation and interaction packets together.  GrimAC
+     * validates that these arrive on the same server tick — the old
+     * multi-tick approach caused false-positive flags and ghost-blocking.
+     *
+     * <p>Liquid placement (buckets) and block-breaking corrections still
+     * use the multi-tick pipeline because they rely on client-side state
+     * that must persist across ticks.
+     *
      * @return {@code true} on the tick a block was actually placed
      */
     public static boolean tick() {
         return switch (phase) {
             case IDLE     -> false;
-            case ROTATING -> tickRotate();
+            case ROTATING -> {
+                // For non-liquid block placement, collapse the entire
+                // rotate → place → finish pipeline into a single tick.
+                // GrimAC validates that rotation and interaction packets
+                // arrive on the same server tick; the old multi-tick
+                // approach caused false-positive flags.
+                boolean isLiquid = pendingDesired != null
+                        && pendingDesired.getBlock() instanceof FluidBlock;
+                yield isLiquid ? tickRotate() : tickPlaceSingleTick();
+            }
             case PLACING  -> tickPlace();
             case FINISHING -> tickFinish();
             case BREAKING -> tickBreaking();
         };
+    }
+
+    // ── single-tick placement (GrimAC-safe) ─────────────────────────────
+
+    /**
+     * Drives the rotate → place → finish phases in a single tick so all
+     * packets (rotation, sneak, swap, interact, unsneak, rotation-restore)
+     * arrive on the same server tick — matching the packet sequence that
+     * GrimAC expects for legitimate placements.
+     */
+    private static boolean tickPlaceSingleTick() {
+        MinecraftClient mc = MinecraftClient.getInstance();
+        if (mc.player == null) { reset(); return false; }
+
+        // Force silent rotation so tickPlace / tickFinish send
+        // server-only look packets without moving the client camera.
+        boolean wasSilent = silentRotation;
+        silentRotation = true;
+
+        // ── rotate (server-side only) ───────────────────────────────
+        sendSilentLookPacket(mc.player, targetYaw, targetPitch);
+        if (pendingNeedsSneak) {
+            pressSneakPacket(mc.player);
+        }
+        phase = PlacePhase.PLACING;
+
+        // ── place ───────────────────────────────────────────────────
+        boolean placed = tickPlace();
+
+        // ── finish (sneak release + rotation restore) ───────────────
+        if (phase == PlacePhase.FINISHING) {
+            tickFinish();
+        }
+
+        silentRotation = wasSilent;
+        return placed;
     }
 
     // ── phase: ROTATING ─────────────────────────────────────────────────
@@ -608,9 +663,10 @@ public final class PlacementEngine {
     // ═══════════════════════════════════════════════════════════════════
 
     /**
-     * Begins a placement attempt.  Does NOT place immediately — instead
-     * starts the rotate → place → finish pipeline.  Call {@link #tick()}
-     * on subsequent ticks to drive it.
+     * Begins a placement attempt.  For solid blocks the placement is
+     * executed on the very next {@link #tick()} call (single-tick).
+     * For self-correction (misplaced blocks), the BREAKING pipeline is
+     * started which takes multiple ticks.
      *
      * <p>For directional blocks (stairs, slabs, pillars, horizontal-facing
      * blocks), the engine reads the desired {@link BlockState}'s properties
@@ -620,7 +676,7 @@ public final class PlacementEngine {
      * @param target       world position to place at
      * @param desired      target block state (including orientation properties)
      * @param allowSwap    whether to pull items from main inventory to hotbar
-     * @return {@code true} if the pipeline was successfully started
+     * @return {@code true} if the placement pipeline was successfully started
      */
     public static boolean placeBlock(BlockPos target, BlockState desired, boolean allowSwap) {
         MinecraftClient mc = MinecraftClient.getInstance();
