@@ -128,9 +128,33 @@ public final class PlacementEngine {
     public static boolean isSilentRotation() { return silentRotation; }
 
     // ── rate limiter ────────────────────────────────────────────────────
+    //
+    // GrimAC enforces a placement budget of roughly 9 blocks per 325 ms.
+    // Each offhand-swap placement sends 3 packets (swap + interact + swap),
+    // which counts toward a separate packet-rate budget as well.
+    //
+    // We use a **sliding window** that tracks when each of the last N
+    // placements occurred.  A new placement is only allowed when the
+    // oldest entry in the window has aged out past the window duration.
+    // This naturally prevents sustained bursts that trip GrimAC after
+    // the first ~10 blocks.
 
     private static final Random JITTER_RNG = new Random();
-    private static int    bps               = 8;
+
+    /** Maximum placements allowed within any {@link #WINDOW_MS} window. */
+    private static final int   WINDOW_SIZE = 8;
+    /** Sliding window duration in milliseconds.  Slightly conservative
+     *  vs GrimAC's 325 ms / 9 blocks to leave safety margin. */
+    private static final long  WINDOW_MS   = 425;
+
+    /** Ring buffer of the last {@link #WINDOW_SIZE} placement timestamps
+     *  (in nanoseconds).  Zero entries are treated as "no placement". */
+    private static final long[] placeHistory = new long[WINDOW_SIZE];
+    private static int          historyIdx   = 0;
+
+    /** Per-block cadence floor — the minimum gap (in ns) between any two
+     *  consecutive placements.  Derived from the user-facing BPS setting. */
+    private static int    bps               = 4;
     private static long   lastPlacementNano = 0;
 
     public static void setBps(int value) {
@@ -140,17 +164,26 @@ public final class PlacementEngine {
     public static int getBps() { return bps; }
 
     /**
-     * Returns {@code true} if the engine is idle and enough time has passed
-     * since the last placement to stay under the configured BPS ceiling.
+     * Returns {@code true} if the engine is idle and both rate limits
+     * (per-block cadence <b>and</b> sliding window) allow another placement.
      */
     public static boolean canPlace() {
         if (phase != PlacePhase.IDLE) return false;
         long nowNano = System.nanoTime();
+
+        // ── per-block cadence check ─────────────────────────────────
         long intervalNano = 1_000_000_000L / bps;
-        // ±25% jitter so the placement cadence doesn't form a
-        // machine-perfect pattern detectable by timing analysis.
         long jitter = (long) (intervalNano * (JITTER_RNG.nextDouble() * 0.5 - 0.25));
-        return (nowNano - lastPlacementNano) >= (intervalNano + jitter);
+        if ((nowNano - lastPlacementNano) < (intervalNano + jitter)) return false;
+
+        // ── sliding window check ────────────────────────────────────
+        long oldest = placeHistory[historyIdx];
+        if (oldest != 0) {
+            long windowNano = WINDOW_MS * 1_000_000L;
+            if ((nowNano - oldest) < windowNano) return false;
+        }
+
+        return true;
     }
 
     public static boolean isBusy() {
@@ -166,9 +199,13 @@ public final class PlacementEngine {
         return phase == PlacePhase.BREAKING;
     }
 
-    /** Record a placement action (updates the rate-limiter timestamp). */
+    /** Record a placement action (updates both the per-block timestamp
+     *  and the sliding window ring buffer). */
     public static void recordPlacement() {
-        lastPlacementNano = System.nanoTime();
+        long now = System.nanoTime();
+        lastPlacementNano = now;
+        placeHistory[historyIdx] = now;
+        historyIdx = (historyIdx + 1) % WINDOW_SIZE;
     }
 
     /** Cancel any in-progress placement or correction and return to idle. */
@@ -199,6 +236,10 @@ public final class PlacementEngine {
         correctionDesired = null;
         breakingTicks = 0;
         postBreakWait = 0;
+        // Clear sliding window so a fresh start doesn't inherit old
+        // timestamps that would throttle the first few placements.
+        java.util.Arrays.fill(placeHistory, 0L);
+        historyIdx = 0;
     }
 
     /** Clears the correction attempt history — call when the printer is
