@@ -19,4 +19,4 @@ stonecutter {
     }
 }
 
-rootProject.name = "litematica-printer"
+rootProject.name = "smartmatica"

@@ -75,7 +75,7 @@ public class SchematicPrinter {
         TOP_DOWN
     }
 
-    private static final Logger LOGGER = LoggerFactory.getLogger("LitematicaPrinter");
+    private static final Logger LOGGER = LoggerFactory.getLogger("Smartmatica");
 
     public enum AutoState {
         BUILDING,

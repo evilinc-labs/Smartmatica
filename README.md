@@ -126,8 +126,8 @@ All commands use the `/printer` prefix:
 
 Build artifacts are placed in each version's `build/libs/` directory:
 ```
-versions/1.21.1/build/libs/litematica-printer-1.0.0+1.21.1.jar
-versions/1.21.4/build/libs/litematica-printer-1.0.0+1.21.4.jar
+versions/1.21.1/build/libs/smartmatica-1.0.0+1.21.1.jar
+versions/1.21.4/build/libs/smartmatica-1.0.0+1.21.4.jar
 ...
 ```
 

@@ -44,7 +44,7 @@ jobs:
           echo "## Build Results" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
           for ver in 1.21.1 1.21.4 1.21.5 1.21.8 1.21.10; do
-            jar="build/libs/1.0.0/litematica-printer-1.0.0+${ver}.jar"
+            jar="build/libs/1.0.0/smartmatica-1.0.0+${ver}.jar"
             if [ -f "$jar" ]; then
               size=$(du -h "$jar" | cut -f1)
               echo "- :white_check_mark: **MC ${ver}** — ${size}" >> "$GITHUB_STEP_SUMMARY"

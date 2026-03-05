@@ -17,7 +17,7 @@ import java.nio.file.Path;
  * Persists schematic printer state so printing can resume after a
  * disconnect, crash, or client restart.
  *
- * <p>Data is written to {@code litematica-printer/printer_checkpoint.json}
+ * <p>Data is written to {@code smartmatica/printer_checkpoint.json}
  * and includes the schematic filename, anchor position, session
  * block count, and the player's last known position.
  */
@@ -25,12 +25,12 @@ public final class PrinterCheckpoint {
 
     private PrinterCheckpoint() {}
 
-    private static final Logger LOGGER = LoggerFactory.getLogger("LitematicaPrinter");
+    private static final Logger LOGGER = LoggerFactory.getLogger("Smartmatica");
 
     private static final Gson GSON = new GsonBuilder().setPrettyPrinting().create();
     private static final Path FILE_PATH = FabricLoader.getInstance()
             .getConfigDir()
-            .resolve("litematica-printer")
+            .resolve("smartmatica")
             .resolve("printer_checkpoint.json");
 
     // ── auto-save interval ──────────────────────────────────────────────

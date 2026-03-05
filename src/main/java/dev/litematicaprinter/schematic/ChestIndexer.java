@@ -29,7 +29,7 @@ import java.util.*;
  */
 public final class ChestIndexer {
 
-    private static final Logger LOGGER = LoggerFactory.getLogger("LitematicaPrinter/ChestIndexer");
+    private static final Logger LOGGER = LoggerFactory.getLogger("Smartmatica/ChestIndexer");
 
     private ChestIndexer() {}
 

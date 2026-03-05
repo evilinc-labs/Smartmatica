@@ -16,13 +16,13 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
- * Litematica Printer — a standalone Fabric mod that automatically places
+ * Smartmatica — a standalone Fabric mod that automatically places
  * blocks from loaded {@code .litematic} schematics.
  */
 public class LitematicaPrinterMod implements ClientModInitializer {
 
-    public static final String MOD_ID = "litematica-printer";
-    public static final Logger LOGGER = LoggerFactory.getLogger("LitematicaPrinter");
+    public static final String MOD_ID = "smartmatica";
+    public static final Logger LOGGER = LoggerFactory.getLogger("Smartmatica");
 
     private static final SchematicPrinter PRINTER = new SchematicPrinter();
 
@@ -30,17 +30,17 @@ public class LitematicaPrinterMod implements ClientModInitializer {
 
     @Override
     public void onInitializeClient() {
-        LOGGER.info("Litematica Printer initializing...");
+        LOGGER.info("Smartmatica initializing...");
 
         // Register keybinding to toggle the printer
         toggleKey = KeyBindingHelper.registerKeyBinding(new KeyBinding(
-                "key.litematica-printer.toggle",
+                "key.smartmatica.toggle",
                 InputUtil.Type.KEYSYM,
                 GLFW.GLFW_KEY_KP_0,
                 /*? if >=1.21.10 {*//*
-                KeyBinding.Category.create(Identifier.of("litematica-printer", "category"))
+                KeyBinding.Category.create(Identifier.of("smartmatica", "category"))
                 *//*?} else {*/
-                "category.litematica-printer"
+                "category.smartmatica"
                 /*?}*/
         ));
 
@@ -61,7 +61,7 @@ public class LitematicaPrinterMod implements ClientModInitializer {
             PRINTER.tick();
         });
 
-        LOGGER.info("Litematica Printer initialized.");
+        LOGGER.info("Smartmatica initialized.");
     }
 
     /** Get the singleton printer instance. */
