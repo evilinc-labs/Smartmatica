@@ -21,6 +21,8 @@ import net.minecraft.util.PlayerInput;
 *//*?} else {*/
 import net.minecraft.network.packet.c2s.play.ClientCommandC2SPacket;
 /*?}*/
+import net.minecraft.network.packet.c2s.play.PlayerActionC2SPacket;
+import net.minecraft.network.packet.c2s.play.PlayerInteractBlockC2SPacket;
 import net.minecraft.network.packet.c2s.play.PlayerMoveC2SPacket;
 import net.minecraft.screen.slot.SlotActionType;
 import net.minecraft.util.ActionResult;
@@ -421,11 +423,27 @@ public final class PlacementEngine {
                 placed = false;
             }
         } else {
-            ActionResult result = mc.interactionManager.interactBlock(player, Hand.MAIN_HAND, hitResult);
-            if (result.isAccepted()) {
-                player.swingHand(Hand.MAIN_HAND);
-            }
-            placed = true; // block placement pipeline always advances
+            // ── Offhand swap trick (GrimAC-safe placement) ──────────
+            // Swap the main-hand item to off-hand (server-side only),
+            // send the placement packet using OFF_HAND, then swap back
+            // — all within the same tick.  GrimAC validates off-hand
+            // placements more leniently, preventing false-positive
+            // flags that cause ghost-blocking (client-side blocks the
+            // server never accepted).
+            player.networkHandler.sendPacket(new PlayerActionC2SPacket(
+                    PlayerActionC2SPacket.Action.SWAP_ITEM_WITH_OFFHAND,
+                    new BlockPos(0, 0, 0), Direction.DOWN));
+            player.networkHandler.sendPacket(new PlayerInteractBlockC2SPacket(
+                    Hand.OFF_HAND, hitResult,
+                    player.currentScreenHandler.getRevision() + 2));
+            player.networkHandler.sendPacket(new PlayerActionC2SPacket(
+                    PlayerActionC2SPacket.Action.SWAP_ITEM_WITH_OFFHAND,
+                    new BlockPos(0, 0, 0), Direction.DOWN));
+            player.swingHand(Hand.MAIN_HAND);
+            // Client-side prediction: set the block so the position
+            // scanner doesn't re-select it before server confirmation.
+            mc.world.setBlockState(pendingTarget, pendingDesired);
+            placed = true;
         }
 
         recordPlacement();

@@ -43,6 +43,7 @@ import java.util.Map;
  * /printer materials             – show bill of materials breakdown
  * /printer toggle                – toggle the printer on/off
  * /printer autobuild             – toggle AutoBuild mode
+ * /printer air                    – toggle air placement
  * /printer sort [mode]           – set build order (bottom_up/top_down/nearest)
  * /printer supply add            – mark block at feet as supply chest
  * /printer supply add &lt;x&gt; &lt;y&gt; &lt;z&gt; – mark specific pos as supply chest
