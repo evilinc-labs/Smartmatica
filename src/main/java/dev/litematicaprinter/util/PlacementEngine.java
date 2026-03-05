@@ -373,11 +373,15 @@ public final class PlacementEngine {
 
         BlockHitResult hitResult;
         if (pendingAirPlace) {
-            // Air placement: click the target position itself with insideBlock=true.
-            Vec3d hitPos = Vec3d.ofCenter(pendingTarget);
+            // Air placement: click the target position itself.
+            Direction airFace = Direction.UP;
+            Vec3d hitPos = Vec3d.ofCenter(pendingTarget).add(
+                    airFace.getOffsetX() * 0.5,
+                    airFace.getOffsetY() * 0.5,
+                    airFace.getOffsetZ() * 0.5);
             // Adjust Y for top-half states placed via air.
             hitPos = adjustHitForAirPlace(hitPos, pendingTarget, pendingDesired);
-            hitResult = new BlockHitResult(hitPos, Direction.UP, pendingTarget, true);
+            hitResult = new BlockHitResult(hitPos, airFace, pendingTarget, false);
         } else {
             // Normal placement: click the neighbour block's face
             BlockPos neighbor = pendingTarget.offset(pendingFace);
@@ -432,13 +436,13 @@ public final class PlacementEngine {
             // server never accepted).
             player.networkHandler.sendPacket(new PlayerActionC2SPacket(
                     PlayerActionC2SPacket.Action.SWAP_ITEM_WITH_OFFHAND,
-                    new BlockPos(0, 0, 0), Direction.DOWN));
+                    BlockPos.ORIGIN, Direction.DOWN));
             player.networkHandler.sendPacket(new PlayerInteractBlockC2SPacket(
                     Hand.OFF_HAND, hitResult,
                     player.currentScreenHandler.getRevision() + 2));
             player.networkHandler.sendPacket(new PlayerActionC2SPacket(
                     PlayerActionC2SPacket.Action.SWAP_ITEM_WITH_OFFHAND,
-                    new BlockPos(0, 0, 0), Direction.DOWN));
+                    BlockPos.ORIGIN, Direction.DOWN));
             player.swingHand(Hand.MAIN_HAND);
             // Client-side prediction: set the block so the position
             // scanner doesn't re-select it before server confirmation.
