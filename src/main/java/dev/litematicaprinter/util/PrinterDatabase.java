@@ -15,7 +15,7 @@ import java.nio.file.Path;
 import java.util.*;
 
 /**
- * Centralised database for the Litematica Printer mod.
+ * Centralised database for the Smartmatica mod.
  *
  * <h2>Tables</h2>
  * <ol>
@@ -25,14 +25,14 @@ import java.util.*;
  * </ol>
  *
  * <p>Supply-chest positions are persisted to
- * {@code config/litematica-printer/printer_supply.json}.
+ * {@code config/smartmatica/printer_supply.json}.
  * Chest snapshots are ephemeral (in-memory only).
  */
 public final class PrinterDatabase {
 
     private PrinterDatabase() {}
 
-    private static final Logger LOGGER = LoggerFactory.getLogger("LitematicaPrinter");
+    private static final Logger LOGGER = LoggerFactory.getLogger("Smartmatica");
 
     // ═══════════════════════════════════════════════════════════════════
     //  SCAFFOLD TRACKING — blocks placed by Baritone during pathfinding
@@ -51,7 +51,7 @@ public final class PrinterDatabase {
 
     private static final Path SCAFFOLD_FILE = FabricLoader.getInstance()
             .getConfigDir()
-            .resolve("litematica-printer")
+            .resolve("smartmatica")
             .resolve("printer_scaffold.json");
 
     /** True when the scaffold table has been modified since the last
@@ -141,7 +141,7 @@ public final class PrinterDatabase {
     private static final Gson GSON = new GsonBuilder().setPrettyPrinting().create();
     private static final Path CHEST_FILE = FabricLoader.getInstance()
             .getConfigDir()
-            .resolve("litematica-printer")
+            .resolve("smartmatica")
             .resolve("printer_supply.json");
 
     /** Register a chest position. Returns false if already registered. */

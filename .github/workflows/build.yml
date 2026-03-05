@@ -37,47 +37,47 @@ jobs:
       - name: Upload MC 1.21.1
         uses: actions/upload-artifact@v4
         with:
-          name: litematica-printer-1.21.1
-          path: build/libs/*/litematica-printer-*+1.21.1.jar
+          name: smartmatica-1.21.1
+          path: build/libs/*/smartmatica-*+1.21.1.jar
           if-no-files-found: error
           retention-days: 14
 
       - name: Upload MC 1.21.4
         uses: actions/upload-artifact@v4
         with:
-          name: litematica-printer-1.21.4
-          path: build/libs/*/litematica-printer-*+1.21.4.jar
+          name: smartmatica-1.21.4
+          path: build/libs/*/smartmatica-*+1.21.4.jar
           if-no-files-found: error
           retention-days: 14
 
       - name: Upload MC 1.21.5
         uses: actions/upload-artifact@v4
         with:
-          name: litematica-printer-1.21.5
-          path: build/libs/*/litematica-printer-*+1.21.5.jar
+          name: smartmatica-1.21.5
+          path: build/libs/*/smartmatica-*+1.21.5.jar
           if-no-files-found: error
           retention-days: 14
 
       - name: Upload MC 1.21.8
         uses: actions/upload-artifact@v4
         with:
-          name: litematica-printer-1.21.8
-          path: build/libs/*/litematica-printer-*+1.21.8.jar
+          name: smartmatica-1.21.8
+          path: build/libs/*/smartmatica-*+1.21.8.jar
           if-no-files-found: error
           retention-days: 14
 
       - name: Upload MC 1.21.10
         uses: actions/upload-artifact@v4
         with:
-          name: litematica-printer-1.21.10
-          path: build/libs/*/litematica-printer-*+1.21.10.jar
+          name: smartmatica-1.21.10
+          path: build/libs/*/smartmatica-*+1.21.10.jar
           if-no-files-found: error
           retention-days: 14
 
       - name: Upload sources
         uses: actions/upload-artifact@v4
         with:
-          name: litematica-printer-sources
-          path: build/libs/*/litematica-printer-*-sources.jar
+          name: smartmatica-sources
+          path: build/libs/*/smartmatica-*-sources.jar
           if-no-files-found: error
           retention-days: 14

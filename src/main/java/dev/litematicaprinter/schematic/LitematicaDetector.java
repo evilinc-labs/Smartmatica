@@ -31,7 +31,7 @@ import java.util.List;
  */
 public final class LitematicaDetector {
 
-    private static final Logger LOGGER = LoggerFactory.getLogger("LitematicaPrinter/Detector");
+    private static final Logger LOGGER = LoggerFactory.getLogger("Smartmatica/Detector");
 
     private LitematicaDetector() {}
 

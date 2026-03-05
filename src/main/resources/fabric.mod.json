@@ -14,7 +14,7 @@
 		]
 	},
 	"mixins": [
-		"litematica-printer.mixins.json"
+		"smartmatica.mixins.json"
 	],
 	"depends": {
 		"fabricloader": ">=0.18.4",

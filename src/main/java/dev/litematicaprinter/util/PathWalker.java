@@ -34,7 +34,7 @@ import java.util.List;
  */
 public final class PathWalker {
 
-    private static final Logger LOGGER = LoggerFactory.getLogger("LitematicaPrinter/PathWalker");
+    private static final Logger LOGGER = LoggerFactory.getLogger("Smartmatica/PathWalker");
 
     private PathWalker() {}
 

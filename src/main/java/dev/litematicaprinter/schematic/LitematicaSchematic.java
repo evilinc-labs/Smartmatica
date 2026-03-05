@@ -39,7 +39,7 @@ import java.util.Set;
  */
 public final class LitematicaSchematic {
 
-    private static final Logger LOGGER = LoggerFactory.getLogger("LitematicaPrinter/Schematic");
+    private static final Logger LOGGER = LoggerFactory.getLogger("Smartmatica/Schematic");
 
     private final String name;
     private final String author;
