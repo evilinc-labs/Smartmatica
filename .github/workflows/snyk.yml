@@ -23,23 +23,20 @@ jobs:
           java-version: '21'
           distribution: 'temurin'
 
+      - name: Install Snyk CLI
+        uses: snyk/actions/setup@master
+
       - name: Grant execute permission
         run: chmod +x gradlew
 
       - name: Snyk dependency scan
-        uses: snyk/actions/gradle@master
         continue-on-error: true
         env:
           SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
-        with:
-          args: --severity-threshold=high --all-sub-projects
-          command: test
+        run: snyk test --severity-threshold=high --all-sub-projects
 
       - name: Snyk monitor (push to main only)
         if: github.ref == 'refs/heads/main' && github.event_name == 'push'
-        uses: snyk/actions/gradle@master
         env:
           SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
-        with:
-          args: --all-sub-projects
-          command: monitor
+        run: snyk monitor --all-sub-projects
