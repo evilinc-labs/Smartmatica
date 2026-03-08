@@ -35,6 +35,7 @@ import net.minecraft.util.math.Vec3d;
 import net.minecraft.util.shape.VoxelShapes;
 import net.minecraft.world.World;
 
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -44,46 +45,21 @@ import java.util.Set;
 
 /**
  * Core automation engine for block placement tasks.
- *
- * For solid-block placement the entire sequence (rotation, sneaking,
- * offhand-swap interaction, unsneaking, rotation restore) is collapsed
- * into a <b>single game tick</b>.  GrimAC validates that rotation and
- * interaction packets arrive on the same server tick — spreading them
- * across ticks triggers false-positive ghost-blocking.
- *
- * Liquid placement (buckets) and self-correction (block breaking)
- * still use a multi-tick pipeline because they depend on client state
- * that must persist across ticks.
- *
- * Designed to stay under server placement-rate limits (default 4 BPS,
- * conservatively under GrimAC's 9-per-325 ms budget) and pass GrimAC
- * RotationPlace / FabricatedPlace / FarPlace / BadPackets checks.
  */
 public final class PlacementEngine {
 
     private PlacementEngine() {}
 
-    // ── placement pipeline states ───────────────────────────────────────
-
     private enum PlacePhase { IDLE, ROTATING, PLACING, FINISHING, BREAKING }
 
     private static PlacePhase phase = PlacePhase.IDLE;
-
-    // ── pipeline context (set in ROTATING, consumed in PLACING/FINISHING) ─
 
     private static BlockPos   pendingTarget;
     private static BlockState pendingDesired;
     private static Direction  pendingFace;
     private static boolean    pendingNeedsSneak;
-    /** When true, place against the target itself (no adjacent block). */
     private static boolean    pendingAirPlace;
-    /** True while {@link #tickPlaceSingleTick()} is driving the pipeline.
-     *  Suppresses redundant flying packets inside {@link #tickPlace()} and
-     *  {@link #tickFinish()} to avoid GrimAC timer violations. */
     private static boolean    singleTickInProgress;
-    /** The item that must be in the player's hand when the placement
-     *  packet is sent.  Verified in tickPlace to prevent wrong-block
-     *  bugs when the hotbar slot changes between ROTATING and PLACING. */
     private static Item       pendingItem;
     private static float      targetYaw;
     private static float      targetPitch;
@@ -91,69 +67,38 @@ public final class PlacementEngine {
     private static float      savedPitch;
     private static int        rotateTicks;
 
-    // ── self-correction state ───────────────────────────────────────────
+    // self-correction state
     /** Position of a block that was placed with wrong orientation. */
     private static BlockPos   correctionTarget;
     /** The desired state for a correction re-place. */
     private static BlockState correctionDesired;
-    /** Ticks spent breaking for correction. */
     private static int        breakingTicks;
-    /** Max ticks to spend mining a misplaced block before giving up. */
     private static final int  MAX_BREAKING_TICKS = 200;
-    /** Ticks to wait after breaking before re-placing (item pickup). */
     private static int        postBreakWait;
-    /** Tracks how many correction attempts have been made per position.
-     *  Bounded to 128 entries — oldest are evicted automatically. */
     private static final int MAX_CORRECTION_ENTRIES = 128;
     private static final Map<BlockPos, Integer> correctionAttempts = new LinkedHashMap<>(32, 0.75f, false) {
         @Override protected boolean removeEldestEntry(Map.Entry<BlockPos, Integer> eldest) {
             return size() > MAX_CORRECTION_ENTRIES;
         }
     };
-    /** Max correction attempts before skipping a position permanently. */
     private static final int MAX_CORRECTION_ATTEMPTS = 2;
-
-    /** Max ticks to spend converging rotation before giving up. */
     private static final int  MAX_ROTATE_TICKS = 4;
-    /** Yaw/pitch must be within this many degrees to be considered converged. */
     private static final float CONVERGE_THRESHOLD = 1.0f;
-    /** Max rotation speed per tick (degrees). */
     private static final float MAX_TURN_SPEED = 30.0f;
 
-    // ── silent rotation (manual mode) ────────────────────────────────────
-    /**
-     * When {@code true}, rotation packets are sent to the server without
-     * visually modifying the client-side player entity yaw/pitch.  This
-     * prevents camera-jerk and conflicting rotation states that cause
-     * server-side rubberbanding in manual (AutoBuild OFF) mode.
-     */
     private static boolean silentRotation = false;
 
     public static void setSilentRotation(boolean value) { silentRotation = value; }
     public static boolean isSilentRotation() { return silentRotation; }
 
-    // ── rate limiter ────────────────────────────────────────────────────
-    //
-    // GrimAC enforces a placement budget of roughly 9 blocks per 325 ms.
-    // Each offhand-swap placement sends 3 packets (swap + interact + swap),
-    // which counts toward a separate packet-rate budget as well.
-    //
-    // We use a **sliding window** that tracks when each of the last N
-    // placements occurred.  A new placement is only allowed when the
-    // oldest entry in the window has aged out past the window duration.
-    // This naturally prevents sustained bursts that trip GrimAC after
-    // the first ~10 blocks.
-
     private static final Random JITTER_RNG = new Random();
-
-    /** Maximum placements allowed within any {@link #WINDOW_MS} window. */
     private static final int   WINDOW_SIZE = 8;
-    /** Sliding window duration in milliseconds.  Slightly conservative
-     *  vs GrimAC's 325 ms / 9 blocks to leave safety margin. */
     private static final long  WINDOW_MS   = 425;
 
-    /** Ring buffer of the last {@link #WINDOW_SIZE} placement timestamps
-     *  (in nanoseconds).  Zero entries are treated as "no placement". */
+    private static final int  BATCH_MAX         = 9;
+    private static final long BATCH_COOLDOWN_MS = 310L;
+    private static long       lastBatchMs       = 0L;
+
     private static final long[] placeHistory = new long[WINDOW_SIZE];
     private static int          historyIdx   = 0;
 
@@ -168,20 +113,14 @@ public final class PlacementEngine {
 
     public static int getBps() { return bps; }
 
-    /**
-     * Returns {@code true} if the engine is idle and both rate limits
-     * (per-block cadence <b>and</b> sliding window) allow another placement.
-     */
     public static boolean canPlace() {
         if (phase != PlacePhase.IDLE) return false;
         long nowNano = System.nanoTime();
 
-        // ── per-block cadence check ─────────────────────────────────
         long intervalNano = 1_000_000_000L / bps;
         long jitter = (long) (intervalNano * (JITTER_RNG.nextDouble() * 0.5 - 0.25));
         if ((nowNano - lastPlacementNano) < (intervalNano + jitter)) return false;
 
-        // ── sliding window check ────────────────────────────────────
         long oldest = placeHistory[historyIdx];
         if (oldest != 0) {
             long windowNano = WINDOW_MS * 1_000_000L;
@@ -195,7 +134,6 @@ public final class PlacementEngine {
         return phase != PlacePhase.IDLE;
     }
 
-    /** Returns the current pipeline phase name for debug logging. */
     public static String getPhase() {
         return phase.name();
     }
@@ -204,8 +142,6 @@ public final class PlacementEngine {
         return phase == PlacePhase.BREAKING;
     }
 
-    /** Record a placement action (updates both the per-block timestamp
-     *  and the sliding window ring buffer). */
     public static void recordPlacement() {
         long now = System.nanoTime();
         lastPlacementNano = now;
@@ -213,11 +149,14 @@ public final class PlacementEngine {
         historyIdx = (historyIdx + 1) % WINDOW_SIZE;
     }
 
-    /** Cancel any in-progress placement or correction and return to idle. */
+    public static boolean canBatchPlace() {
+        if (phase != PlacePhase.IDLE) return false;
+        return System.currentTimeMillis() - lastBatchMs >= BATCH_COOLDOWN_MS;
+    }
+
     public static void reset() {
         if (pendingNeedsSneak && phase == PlacePhase.FINISHING) {
             if (SneakOverride.isForceAbsoluteSneak()) {
-                // Edge-walk sneak active — keep server in sync
                 MinecraftClient mc = MinecraftClient.getInstance();
                 if (mc.player != null) pressSneakPacket(mc.player);
             } else {
@@ -242,31 +181,19 @@ public final class PlacementEngine {
         correctionDesired = null;
         breakingTicks = 0;
         postBreakWait = 0;
-        // Clear sliding window so a fresh start doesn't inherit old
-        // timestamps that would throttle the first few placements.
         java.util.Arrays.fill(placeHistory, 0L);
         historyIdx = 0;
+        lastBatchMs = 0L;
     }
 
-    /** Clears the correction attempt history — call when the printer is
-     *  toggled on so previously-skipped positions get a fresh chance. */
     public static void clearCorrectionHistory() {
         correctionAttempts.clear();
     }
 
-    /** Prune stale entries from correctionAttempts.
-     *  Entries that have reached MAX_CORRECTION_ATTEMPTS are "give-up"
-     *  markers and must be KEPT so the engine doesn't re-attempt them.
-     *  Only entries below the threshold (i.e. intermediate attempts for
-     *  positions that were successfully corrected and later dirtied again)
-     *  are eligible for pruning. */
     public static void pruneCompletedCorrections() {
-        // Remove entries whose positions now match the schematic (successful
-        // corrections), keeping give-up markers intact.
         correctionAttempts.values().removeIf(v -> v < MAX_CORRECTION_ATTEMPTS);
     }
 
-    // ── per-tick inventory cache ────────────────────────────────────────
     private static Map<Item, Integer> cachedInventory = Map.of();
     private static long cachedInventoryTick = -1;
 
@@ -286,35 +213,12 @@ public final class PlacementEngine {
         return cachedInventory;
     }
 
-    // ═══════════════════════════════════════════════════════════════════
-    //  PLACEMENT PIPELINE
-    // ═══════════════════════════════════════════════════════════════════
-
-    /**
-     * Tick the placement pipeline.  Must be called every client tick while
-     * the printer is active.
-     *
-     * For non-liquid block placements the entire rotate → place → finish
-     * sequence is collapsed into a <b>single tick</b> so that the server
-     * receives the rotation and interaction packets together.  GrimAC
-     * validates that these arrive on the same server tick — the old
-     * multi-tick approach caused false-positive flags and ghost-blocking.
-     *
-     * <p>Liquid placement (buckets) and block-breaking corrections still
-     * use the multi-tick pipeline because they rely on client-side state
-     * that must persist across ticks.
-     *
-     * @return true on the tick a block was actually placed
-     */
+    /** @return true when a block was placed */
     public static boolean tick() {
         return switch (phase) {
             case IDLE     -> false;
             case ROTATING -> {
-                // For non-liquid block placement, collapse the entire
-                // rotate → place → finish pipeline into a single tick.
-                // GrimAC validates that rotation and interaction packets
-                // arrive on the same server tick; the old multi-tick
-                // approach caused false-positive flags.
+
                 boolean isLiquid = pendingDesired != null
                         && pendingDesired.getBlock() instanceof FluidBlock;
                 yield isLiquid ? tickRotate() : tickPlaceSingleTick();
@@ -325,35 +229,21 @@ public final class PlacementEngine {
         };
     }
 
-    // ── single-tick placement ─────────────────────────────
-
-    /**
-     * Drives the rotate → place → finish phases in a single tick so all
-     * packets (rotation, sneak, swap, interact, unsneak, rotation-restore)
-     * arrive on the same server tick — matching the packet sequence that
-     * GrimAC expects for legitimate placements.
-     */
     private static boolean tickPlaceSingleTick() {
         MinecraftClient mc = MinecraftClient.getInstance();
         if (mc.player == null) { reset(); return false; }
 
-        // Force silent rotation so tickPlace / tickFinish send
-        // server-only look packets without moving the client camera.
         boolean wasSilent = silentRotation;
         silentRotation = true;
         singleTickInProgress = true;
 
-        // ── rotate ───────────────────────────────────────────────────
         sendSilentLookPacket(mc.player, targetYaw, targetPitch);
         if (pendingNeedsSneak) {
             pressSneakPacket(mc.player);
         }
         phase = PlacePhase.PLACING;
 
-        // ── place ───────────────────────────────────────────────────
         boolean placed = tickPlace();
-
-        // ── finish (sneak release + rotation restore) ───────────────
         if (phase == PlacePhase.FINISHING) {
             tickFinish();
         }
@@ -363,8 +253,6 @@ public final class PlacementEngine {
         return placed;
     }
 
-    // ── phase: ROTATING ─────────────────────────────────────────────────
-
     private static boolean tickRotate() {
         MinecraftClient mc = MinecraftClient.getInstance();
         if (mc.player == null) { reset(); return false; }
@@ -372,10 +260,6 @@ public final class PlacementEngine {
         rotateTicks++;
 
         if (silentRotation) {
-            // ── Silent mode (manual placement): ────────────────────────
-            // Send the target rotation to the server without changing the
-            // client-side entity yaw/pitch.  The player's camera stays
-            // where they left it — no visual jerk, no conflicting state.
             sendSilentLookPacket(mc.player, targetYaw, targetPitch);
 
             if (pendingNeedsSneak) {
@@ -386,7 +270,6 @@ public final class PlacementEngine {
             return false;
         }
 
-        // ── Normal mode (auto-build): smooth interpolation ─────────────
         float currentYaw = mc.player.getYaw();
         float currentPitch = mc.player.getPitch();
 
@@ -409,11 +292,7 @@ public final class PlacementEngine {
                 mc.player.setPitch(targetPitch);
             }
 
-            // Send the final rotation to the server so it's in sync
-            // before the placement packet arrives next tick.
             sendLookPacket(mc.player, mc.player.getYaw(), mc.player.getPitch());
-
-            // Send sneak packet this tick (will interact next tick)
             if (pendingNeedsSneak) {
                 pressSneakPacket(mc.player);
             }
@@ -424,8 +303,6 @@ public final class PlacementEngine {
         return false;
     }
 
-    // ── phase: PLACING ──────────────────────────────────────────────────
-
     private static boolean tickPlace() {
         MinecraftClient mc = MinecraftClient.getInstance();
         if (mc.player == null || mc.interactionManager == null || mc.world == null) {
@@ -435,7 +312,6 @@ public final class PlacementEngine {
 
         ClientPlayerEntity player = mc.player;
 
-        // Verify correct item is still selected
         if (pendingItem != null) {
             PlayerInventory inv = player.getInventory();
             /*? if >=1.21.5 {*//*
@@ -444,9 +320,7 @@ public final class PlacementEngine {
             Item held = inv.getStack(inv.selectedSlot).getItem();
             /*?}*/
             if (held != pendingItem) {
-                // Try to re-select the correct item
                 if (!selectItem(player, mc, pendingItem, true)) {
-                    // Item no longer available — abort this placement
                     if (pendingNeedsSneak) {
                         if (SneakOverride.isForceAbsoluteSneak()) {
                             pressSneakPacket(player);
@@ -469,47 +343,32 @@ public final class PlacementEngine {
 
         Vec3d eyePos = player.getEyePos();
 
-        // In silent-rotation mode the entity yaw/pitch is the player's
-        // real look direction (unchanged), so use the stored target
-        // angles for the ray-face hit computation instead.
         float placeYaw   = silentRotation ? targetYaw   : player.getYaw();
         float placePitch  = silentRotation ? targetPitch : player.getPitch();
 
         BlockHitResult hitResult;
         if (pendingAirPlace) {
-            // Air placement: click the target position itself.
             Direction airFace = Direction.UP;
             Vec3d hitPos = Vec3d.ofCenter(pendingTarget).add(
                     airFace.getOffsetX() * 0.5,
                     airFace.getOffsetY() * 0.5,
                     airFace.getOffsetZ() * 0.5);
-            // Adjust Y for top-half states placed via air.
             hitPos = adjustHitForAirPlace(hitPos, pendingTarget, pendingDesired);
             hitResult = new BlockHitResult(hitPos, airFace, pendingTarget, false);
         } else {
-            // Normal placement: click the neighbour block's face
             BlockPos neighbor = pendingTarget.offset(pendingFace);
             Direction clickSide = pendingFace.getOpposite();
             Vec3d hitPos = computeRayFaceHit(eyePos, placeYaw, placePitch,
                                               neighbor, clickSide, mc.world);
-            // Adjust hit for half-placement (stairs/slabs/trapdoors).
             hitPos = adjustHitForHalf(hitPos, neighbor, clickSide, pendingDesired);
-
-            // Apply hinge adjustment for doors
             hitPos = adjustHitForDoorHinge(hitPos, neighbor, pendingDesired);
 
             hitResult = new BlockHitResult(hitPos, clickSide, neighbor, false);
         }
 
-        // ── Reach validation ────────────────────────────────────────
-        // Verify the actual hit position is within interaction range
-        // before sending the packet.  GriefKit2 uses 5.154 + 0.1 margin;
-        // we use 4.5 (vanilla reach) + a small margin to match vanilla
-        // behavior and stay well under GrimAC's FarPlace check.
         {
             double reachSq = 4.5 * 4.5;
             if (eyePos.squaredDistanceTo(hitResult.getPos()) > reachSq) {
-                // Hit position is beyond reach — abort placement.
                 phase = PlacePhase.IDLE;
                 pendingTarget = null;
                 pendingDesired = null;
@@ -517,31 +376,18 @@ public final class PlacementEngine {
             }
         }
 
-        // In silent-rotation mode, re-send the server-side look just
-        // before the interact packet so the server's view of the player
-        // rotation matches the placement direction on the same tick.
-        // Skip when called from tickPlaceSingleTick — a flying packet
-        // was already sent and duplicating it causes GrimAC CheckTimer
-        // violations (each flying packet counts as a server tick).
+
         if (silentRotation && !singleTickInProgress) {
             sendSilentLookPacket(player, placeYaw, placePitch);
         }
 
-        // Interact
         boolean isLiquidPlacement = pendingDesired.getBlock() instanceof FluidBlock;
         boolean placed;
         if (isLiquidPlacement) {
-            // Buckets use Item.use() which does its own ray cast from the
-            // player's eye position.  interactBlock → useOnBlock returns PASS
-            // for bucket items, so we must call interactItem directly.
             ActionResult result = mc.interactionManager.interactItem(player, Hand.MAIN_HAND);
             if (result.isAccepted()) {
                 player.swingHand(Hand.MAIN_HAND);
             }
-            // Verify the liquid was actually placed at the intended target.
-            // interactItem does its own ray cast which may land on a
-            // different position than pendingTarget if the look direction
-            // drifted.  Check the world state at pendingTarget to confirm.
             if (result.isAccepted()) {
                 BlockState afterState = mc.world.getBlockState(pendingTarget);
                 placed = afterState.getBlock() instanceof FluidBlock
@@ -550,13 +396,6 @@ public final class PlacementEngine {
                 placed = false;
             }
         } else {
-            // ── Offhand swap trick (GrimAC-safe placement) ──────────
-            // Swap the main-hand item to off-hand (server-side only),
-            // send the placement packet using OFF_HAND, then swap back
-            // — all within the same tick.  GrimAC validates off-hand
-            // placements more leniently, preventing false-positive
-            // flags that cause ghost-blocking (client-side blocks the
-            // server never accepted).
             player.networkHandler.sendPacket(new PlayerActionC2SPacket(
                     PlayerActionC2SPacket.Action.SWAP_ITEM_WITH_OFFHAND,
                     BlockPos.ORIGIN, Direction.DOWN));
@@ -567,8 +406,6 @@ public final class PlacementEngine {
                     PlayerActionC2SPacket.Action.SWAP_ITEM_WITH_OFFHAND,
                     BlockPos.ORIGIN, Direction.DOWN));
             player.swingHand(Hand.MAIN_HAND);
-            // Client-side prediction: set the block so the position
-            // scanner doesn't re-select it before server confirmation.
             mc.world.setBlockState(pendingTarget, pendingDesired);
             placed = true;
         }
@@ -578,10 +415,6 @@ public final class PlacementEngine {
         if (pendingNeedsSneak) {
             phase = PlacePhase.FINISHING;
         } else {
-            // Restore look direction.
-            // Skip when called from tickPlaceSingleTick — the next natural
-            // client tick flying packet will restore the rotation without
-            // adding an extra flying packet that bloats the timer budget.
             if (!singleTickInProgress) {
                 if (!silentRotation) {
                     restoreLook(player);
@@ -597,24 +430,14 @@ public final class PlacementEngine {
         return placed;
     }
 
-    // ── phase: FINISHING (release sneak on a separate tick) ──────────────
-
     private static boolean tickFinish() {
         MinecraftClient mc = MinecraftClient.getInstance();
         if (mc.player != null) {
-            // If edge-walking is forcing absolute sneak, don't
-            // send a release packet — the server must stay in sync with
-            // the client's forced sneak state.  Instead re-press so the
-            // server keeps the player sneaking.
             if (SneakOverride.isForceAbsoluteSneak()) {
                 pressSneakPacket(mc.player);
             } else {
                 releaseSneakPacket();
             }
-            // Restore look direction.
-            // Skip when called from tickPlaceSingleTick — the next
-            // natural client tick handles rotation restore, avoiding
-            // an extra flying packet that triggers timer violations.
             if (!singleTickInProgress) {
                 if (!silentRotation) {
                     restoreLook(mc.player);
@@ -631,8 +454,6 @@ public final class PlacementEngine {
         return false;
     }
 
-    // ── phase: BREAKING (self-correction — mine misplaced block) ────────
-
     private static boolean tickBreaking() {
         MinecraftClient mc = MinecraftClient.getInstance();
         if (mc.player == null || mc.interactionManager == null || mc.world == null) {
@@ -640,11 +461,9 @@ public final class PlacementEngine {
             return false;
         }
 
-        // ── post-break wait: allow dropped item to be picked up ──────
         if (postBreakWait > 0) {
             postBreakWait--;
             if (postBreakWait <= 0) {
-                // Done waiting — return to IDLE for re-placement
                 restoreLook(mc.player);
                 correctionTarget = null;
                 correctionDesired = null;
@@ -663,18 +482,13 @@ public final class PlacementEngine {
             return false;
         }
 
-        // Check if the block has been broken
         BlockState current = mc.world.getBlockState(correctionTarget);
         if (current.isAir() || current.isReplaceable()) {
             mc.interactionManager.cancelBlockBreaking();
-            // Block broken — wait for item pickup
             postBreakWait = 5;
             return false;
         }
 
-        // ── maintain look direction toward the block every tick ───────
-        //   updateBlockBreakingProgress requires the player to be looking
-        //   at the block; if the look drifts, break progress resets.
         Vec3d eyePos = mc.player.getEyePos();
         Vec3d blockCenter = Vec3d.ofCenter(correctionTarget);
         Vec3d toBlock = blockCenter.subtract(eyePos);
@@ -684,7 +498,6 @@ public final class PlacementEngine {
 
         sendLookPacket(mc.player, breakYaw, breakPitch);
 
-        // Continue breaking — send break progress packets
         Direction breakFace = Direction.UP;
         mc.interactionManager.updateBlockBreakingProgress(
                 correctionTarget, breakFace);
@@ -693,26 +506,6 @@ public final class PlacementEngine {
         return false;
     }
 
-    // ═══════════════════════════════════════════════════════════════════
-    //  BLOCK PLACEMENT (entry point — begins the pipeline)
-    // ═══════════════════════════════════════════════════════════════════
-
-    /**
-     * Begins a placement attempt.  For solid blocks the placement is
-     * executed on the very next {@link #tick()} call (single-tick).
-     * For self-correction (misplaced blocks), the BREAKING pipeline is
-     * started which takes multiple ticks.
-     *
-     * <p>For directional blocks (stairs, slabs, pillars, horizontal-facing
-     * blocks), the engine reads the desired {@link BlockState}'s properties
-     * and computes the correct player yaw, placement face, and hit position
-     * to produce the intended orientation.
-     *
-     * @param target       world position to place at
-     * @param desired      target block state (including orientation properties)
-     * @param allowSwap    whether to pull items from main inventory to hotbar
-     * @return {@code true} if the placement pipeline was successfully started
-     */
     public static boolean placeBlock(BlockPos target, BlockState desired, boolean allowSwap) {
         MinecraftClient mc = MinecraftClient.getInstance();
         if (mc.player == null || mc.interactionManager == null || mc.world == null) return false;
@@ -721,7 +514,7 @@ public final class PlacementEngine {
         ClientPlayerEntity player = mc.player;
         World world = mc.world;
 
-        // ── skip auto-created parts (door upper, bed head, tall plant upper) ──
+        // Skip auto-created parts (door upper, bed head, tall plant upper)
         Block desiredBlock = desired.getBlock();
         if (desiredBlock instanceof DoorBlock
                 && desired.contains(Properties.DOUBLE_BLOCK_HALF)
@@ -739,29 +532,22 @@ public final class PlacementEngine {
             return false;
         }
 
-        // ── 0. self-correction: wrong orientation already placed? ────────
+        // Wrong orientation → break and re-place
         BlockState existing = world.getBlockState(target);
         if (!existing.isAir() && !existing.isReplaceable()
                 && existing.getBlock() == desired.getBlock()
                 && !existing.equals(desired)
                 && isOrientationMismatch(existing, desired)) {
-            // Check if we've already tried correcting this position too many times.
-            // This breaks fail loops where the engine can't produce the right
-            // orientation and endlessly breaks + re-places the same block.
             BlockPos immutable = target.toImmutable();
             int attempts = correctionAttempts.getOrDefault(immutable, 0);
             if (attempts >= MAX_CORRECTION_ATTEMPTS) {
-                // Give up on this position — treat it as "placed" and move on.
                 return false;
             }
             correctionAttempts.put(immutable, attempts + 1);
-            // Same block type, wrong rotation — break it first
             return startCorrection(target, desired, player, mc);
         }
 
-        // ── 0b. scaffold removal: Baritone-placed block occupying a ─────
-        //    schematic position.  Break it so the correct block can be
-        //    placed on the next cycle.
+        // Scaffold removal
         if (!existing.isAir() && !existing.isReplaceable()
                 && existing.getBlock() != desired.getBlock()
                 && PrinterDatabase.isScaffold(target)) {
@@ -774,9 +560,7 @@ public final class PlacementEngine {
             return startCorrection(target, desired, player, mc);
         }
 
-        // ── 0c. foreign block replacement: a block that doesn't match ───
-        //    the schematic occupies this position.  Break it so the
-        //    correct block can be placed on the next cycle.
+        // Foreign block replacement
         if (!existing.isAir() && !existing.isReplaceable()
                 && existing.getBlock() != desired.getBlock()) {
             BlockPos immutable = target.toImmutable();
@@ -788,17 +572,12 @@ public final class PlacementEngine {
             return startCorrection(target, desired, player, mc);
         }
 
-        // ── 1. find the required item ───────────────────────────────────
+        // 1. find the required item
         Item requiredItem = desired.getBlock().asItem();
         if (requiredItem == Items.AIR) return false;
 
         if (!selectItem(player, mc, requiredItem, allowSwap)) return false;
 
-        // ── 1b. entity collision check ──────────────────────────────────
-        //  Verify no entity occupies the target position, and that the
-        //  block can physically be placed there.  Matches the canPlace()
-        //  pattern used by both GriefKit2 and Highway-Gooner to avoid
-        //  wasting rate-limit tokens on unplaceable positions.
         if (!world.canPlace(desired, target,
                 net.minecraft.block.ShapeContext.absent())) {
             return false;
@@ -815,19 +594,9 @@ public final class PlacementEngine {
             }
         }
 
-        // ── 2. find an adjacent face to click ───────────────────────────
-        //  For pillar blocks (logs, quartz pillars, etc.), prefer clicking
-        //  a face whose axis matches the desired axis property.
         Direction face = findOrientedPlacementFace(world, target, desired);
 
-        if (face == null) {
-            // No adjacent solid block to click against.  Air placements
-            // are immediately rejected by GrimAC's AirLiquidPlace check
-            // (cancelvl=0) because the packet's block position points to
-            // an air block.  Skip this block — the bottom-up sort order
-            // ensures we'll retry once neighboring blocks are placed.
-            return false;
-        }
+        if (face == null) return false;
 
         Vec3d eyePos = player.getEyePos();
         float desiredYaw;
@@ -839,49 +608,34 @@ public final class PlacementEngine {
             Block neighborBlock = world.getBlockState(neighbor).getBlock();
             needsSneak = isInteractive(neighborBlock);
 
-            // ── 3. compute yaw + hit position for correct orientation ────────
             Direction clickSide = face.getOpposite();
-
-            // Start with a default hit on the face center
             Vec3d hitPos = computeRayFaceHit(eyePos, player.getYaw(), player.getPitch(),
                                               neighbor, clickSide, world);
-
-            // Override hit Y for slab / stair half placement
             hitPos = adjustHitForHalf(hitPos, neighbor, clickSide, desired);
-
-            // Override hit X/Z for door hinge side
             hitPos = adjustHitForDoorHinge(hitPos, neighbor, desired);
 
-            // Compute yaw/pitch from eye to hit position
             Vec3d toHit = hitPos.subtract(eyePos);
             double horizDist = Math.sqrt(toHit.x * toHit.x + toHit.z * toHit.z);
             desiredYaw = (float) (MathHelper.atan2(toHit.z, toHit.x) * (180.0 / Math.PI)) - 90.0f;
             desiredPitch = (float) -(MathHelper.atan2(toHit.y, horizDist) * (180.0 / Math.PI));
 
-            // Override yaw for blocks that use the player's horizontal facing
             Float facingYaw = getRequiredYaw(desired);
             if (facingYaw != null) {
                 desiredYaw = facingYaw;
-                // Recompute pitch toward the hit position using the forced yaw
                 desiredPitch = computePitchToward(eyePos, hitPos);
             }
-            // Override pitch for 6-dir blocks facing UP/DOWN
             Float facingPitch = getRequiredPitch(desired);
             if (facingPitch != null) {
                 desiredPitch = facingPitch;
             }
         }
 
-        // ── 4. store pipeline state and begin rotation ──────────────────
         pendingTarget = target.toImmutable();
         pendingDesired = desired;
         pendingFace = face;
         pendingAirPlace = false;
         pendingNeedsSneak = needsSneak;
         pendingItem = requiredItem;
-        // Snap to mouse-sensitivity GCD so the rotation delta looks
-        // reachable with the player's input device.  Both GriefKit2 and
-        // Highway-Gooner apply the same transformation.
         targetYaw = snapToMouseGCD(desiredYaw, player.getYaw());
         targetPitch = MathHelper.clamp(
                 snapToMouseGCD(desiredPitch, player.getPitch()),
@@ -894,19 +648,6 @@ public final class PlacementEngine {
         return true;
     }
 
-    /**
-     * Starts the placement pipeline for a liquid source block (water / lava).
-     *
-     * <p>Liquid placement uses the same multi-tick rotation pipeline as
-     * {@link #placeBlock}, but selects a bucket item instead of a
-     * {@link BlockItem} and skips orientation overrides (liquids have no
-     * directional properties).
-     *
-     * @param target       world position to place the liquid at
-     * @param desired      target block state ({@link FluidBlock} with level 0)
-     * @param allowSwap    whether to pull items from main inventory to hotbar
-     * @return {@code true} if the pipeline was successfully started
-     */
     public static boolean placeLiquid(BlockPos target, BlockState desired, boolean allowSwap) {
         MinecraftClient mc = MinecraftClient.getInstance();
         if (mc.player == null || mc.interactionManager == null || mc.world == null) return false;
@@ -915,44 +656,30 @@ public final class PlacementEngine {
         ClientPlayerEntity player = mc.player;
         World world = mc.world;
 
-        // Determine the bucket item for this fluid
         Item bucketItem;
         Block block = desired.getBlock();
         if (block == Blocks.WATER) bucketItem = Items.WATER_BUCKET;
         else if (block == Blocks.LAVA) bucketItem = Items.LAVA_BUCKET;
         else return false;
 
-        // Pre-check: verify the target position is suitable for liquid.
-        // Must be air, replaceable, or flowing same-type fluid.
-        // If it's already a source block of the right type, skip.
-        // If it's a solid block, the bucket can't place there.
         BlockState currentState = world.getBlockState(target);
         if (!currentState.isAir() && !currentState.isReplaceable()) {
-            // Position has a non-replaceable block — check if it's the
-            // correct fluid source (already done) or a solid obstacle.
             if (currentState.getBlock() instanceof FluidBlock) {
                 if (currentState.getFluidState().isStill()) {
-                    return false; // already a source block — nothing to do
+                    return false;
                 }
-                // Flowing fluid — can place a source over it
             } else {
-                return false; // solid block — can't place liquid here
+                return false;
             }
         }
 
-        // Buckets use interactItem which does its own ray cast from the
-        // player's eye.  When the player is below the target, the ray
-        // hits the UNDERSIDE of the adjacent block and places liquid on
-        // the wrong face.  Only allow placement when the eye is at or
-        // above the target Y so the ray naturally hits the correct face.
+        // Eye must be at or above target for correct ray cast
         if (player.getEyePos().y < target.getY()) {
             return false;
         }
 
         if (!selectItem(player, mc, bucketItem, allowSwap)) return false;
 
-        // Find an adjacent solid block to click against.
-        // Buckets REQUIRE a solid face — you can't pour liquid into empty air.
         Direction face = findPlacementFace(world, target);
         if (face == null) return false;
 
@@ -966,10 +693,6 @@ public final class PlacementEngine {
             Block neighborBlock = world.getBlockState(neighbor).getBlock();
             needsSneak = isInteractive(neighborBlock);
 
-            // For liquid placement, point the player's look at the center
-            // of the neighbor face that borders the target.  BucketItem.use()
-            // does its own ray cast from the player's eye — it will hit
-            // this face and pour the liquid into the adjacent air/fluid block.
             Direction clickSide = face.getOpposite();
             Vec3d faceCenter = Vec3d.ofCenter(neighbor)
                     .add(Vec3d.of(clickSide.getVector()).multiply(0.5));
@@ -979,7 +702,6 @@ public final class PlacementEngine {
             desiredPitch = (float) -(MathHelper.atan2(toHit.y, horizDist) * (180.0 / Math.PI));
         }
 
-        // Store pipeline state and begin rotation
         pendingTarget = target.toImmutable();
         pendingDesired = desired;
         pendingFace = face;
@@ -998,9 +720,157 @@ public final class PlacementEngine {
         return true;
     }
 
+
+    private record BatchEntry(BlockPos target, BlockState desired,
+                              BlockHitResult hitResult) {}
+
+
+    public static int placeBatch(List<BlockPos> targets, List<BlockState> states,
+                                 boolean allowSwap) {
+        MinecraftClient mc = MinecraftClient.getInstance();
+        if (mc.player == null || mc.world == null || mc.interactionManager == null)
+            return 0;
+        if (phase != PlacePhase.IDLE) return 0;
+        if (targets.isEmpty()) return 0;
+
+            long now = System.currentTimeMillis();
+        if (now - lastBatchMs < BATCH_COOLDOWN_MS) return 0;
+
+        ClientPlayerEntity player = mc.player;
+        World world = mc.world;
+        Vec3d eyePos = player.getEyePos();
+        double reachSq = 4.5 * 4.5;
+
+        Item requiredItem = states.get(0).getBlock().asItem();
+        if (requiredItem == Items.AIR) return 0;
+        if (!selectItem(player, mc, requiredItem, allowSwap)) return 0;
+
+        List<BatchEntry> entries = new ArrayList<>(BATCH_MAX);
+        boolean needsSneak = false;
+        float batchYaw = player.getYaw();
+        float batchPitch = player.getPitch();
+
+        for (int i = 0; i < targets.size() && entries.size() < BATCH_MAX; i++) {
+            BlockPos target = targets.get(i);
+            BlockState desired = states.get(i);
+
+            if (desired.getBlock().asItem() != requiredItem) continue;
+            BlockState currentState = world.getBlockState(target);
+            if (!currentState.isAir() && !currentState.isReplaceable()) continue;
+
+            if (!world.canPlace(desired, target,
+                    net.minecraft.block.ShapeContext.absent())) continue;
+            {
+                net.minecraft.util.math.Box placeBox =
+                        net.minecraft.util.math.Box.from(Vec3d.ofCenter(target));
+                boolean blocked = false;
+                for (net.minecraft.entity.Entity e : world.getOtherEntities(null, placeBox)) {
+                    if (!e.isSpectator() && e.isAlive()) { blocked = true; break; }
+                }
+                if (blocked) continue;
+            }
+
+            Direction face = findPlacementFace(world, target);
+            BlockHitResult hitResult;
+
+            if (face != null) {
+                BlockPos neighbor = target.offset(face);
+                Direction clickSide = face.getOpposite();
+                Vec3d hitPos = Vec3d.ofCenter(neighbor)
+                        .add(clickSide.getOffsetX() * 0.5,
+                             clickSide.getOffsetY() * 0.5,
+                             clickSide.getOffsetZ() * 0.5);
+                hitPos = adjustHitForHalf(hitPos, neighbor, clickSide, desired);
+                hitPos = adjustHitForDoorHinge(hitPos, neighbor, desired);
+                hitResult = new BlockHitResult(hitPos, clickSide, neighbor, false);
+
+                if (isInteractive(world.getBlockState(neighbor).getBlock())) {
+                    needsSneak = true;
+                }
+            } else {
+                Direction airFace = getFaceTowardPlayer(player, target);
+                Vec3d hitPos = Vec3d.ofCenter(target);
+                hitPos = adjustHitForAirPlace(hitPos, target, desired);
+                hitResult = new BlockHitResult(hitPos, airFace, target, false);
+            }
+
+            if (eyePos.squaredDistanceTo(hitResult.getPos()) > reachSq) continue;
+
+            if (entries.isEmpty()) {
+                Vec3d toHit = hitResult.getPos().subtract(eyePos);
+                double hDist = Math.sqrt(toHit.x * toHit.x + toHit.z * toHit.z);
+                batchYaw = (float) (MathHelper.atan2(toHit.z, toHit.x)
+                        * (180.0 / Math.PI)) - 90.0f;
+                batchPitch = (float) -(MathHelper.atan2(toHit.y, hDist)
+                        * (180.0 / Math.PI));
+                Float facingYaw = getRequiredYaw(desired);
+                if (facingYaw != null) batchYaw = facingYaw;
+                Float facingPitch = getRequiredPitch(desired);
+                if (facingPitch != null) batchPitch = facingPitch;
+                batchYaw = snapToMouseGCD(batchYaw, player.getYaw());
+                batchPitch = MathHelper.clamp(
+                        snapToMouseGCD(batchPitch, player.getPitch()),
+                        -90.0f, 90.0f);
+            }
+
+            entries.add(new BatchEntry(target.toImmutable(), desired, hitResult));
+            world.setBlockState(target, desired);
+        }
+
+        if (entries.isEmpty()) return 0;
+
+        sendSilentLookPacket(player, batchYaw, batchPitch);
+        if (needsSneak) pressSneakPacket(player);
+
+        player.networkHandler.sendPacket(new PlayerActionC2SPacket(
+                PlayerActionC2SPacket.Action.SWAP_ITEM_WITH_OFFHAND,
+                BlockPos.ORIGIN, Direction.DOWN));
+
+        int seq = player.currentScreenHandler.getRevision();
+        for (BatchEntry entry : entries) {
+            player.networkHandler.sendPacket(new PlayerInteractBlockC2SPacket(
+                    Hand.OFF_HAND, entry.hitResult, ++seq));
+        }
+
+        player.networkHandler.sendPacket(new PlayerActionC2SPacket(
+                PlayerActionC2SPacket.Action.SWAP_ITEM_WITH_OFFHAND,
+                BlockPos.ORIGIN, Direction.DOWN));
+
+        player.swingHand(Hand.MAIN_HAND);
+
+        if (needsSneak) {
+            if (SneakOverride.isForceAbsoluteSneak()) {
+                pressSneakPacket(player);
+            } else {
+                releaseSneakPacket();
+            }
+        }
+
+        lastBatchMs = now;
+        for (int i = 0; i < entries.size(); i++) {
+            recordPlacement();
+        }
+
+        return entries.size();
+    }
+
+    private static Direction getFaceTowardPlayer(ClientPlayerEntity player,
+                                                 BlockPos pos) {
+        Vec3d eye = player.getEyePos();
+        Vec3d center = Vec3d.ofCenter(pos);
+        Vec3d delta = eye.subtract(center);
+
+        double ax = Math.abs(delta.x);
+        double ay = Math.abs(delta.y);
+        double az = Math.abs(delta.z);
+
+        if (ay >= ax && ay >= az) return delta.y > 0 ? Direction.UP : Direction.DOWN;
+        if (ax >= ay && ax >= az) return delta.x > 0 ? Direction.EAST : Direction.WEST;
+        return delta.z > 0 ? Direction.SOUTH : Direction.NORTH;
+    }
+
     /**
-     * Begin a self-correction: break the misplaced block so it can be
-     * re-placed with correct orientation on a subsequent tick.
+     * Break the misplaced block for re-placement.
      */
     private static boolean startCorrection(BlockPos target, BlockState desired,
                                            ClientPlayerEntity player,
@@ -1011,11 +881,9 @@ public final class PlacementEngine {
         savedYaw = player.getYaw();
         savedPitch = player.getPitch();
 
-        // Select the best tool for breaking this block
         BlockState existing = mc.world.getBlockState(target);
         selectBestTool(player, mc, existing);
 
-        // Look at the block to break it
         Vec3d eyePos = player.getEyePos();
         Vec3d blockCenter = Vec3d.ofCenter(target);
         Vec3d toBlock = blockCenter.subtract(eyePos);
@@ -1024,25 +892,12 @@ public final class PlacementEngine {
         float breakPitch = (float) -(MathHelper.atan2(toBlock.y, horizDist) * (180.0 / Math.PI));
 
         sendLookPacket(player, breakYaw, breakPitch);
-
-        // Start the breaking process
         mc.interactionManager.attackBlock(target, Direction.UP);
         phase = PlacePhase.BREAKING;
         return true;
     }
 
-    // ═══════════════════════════════════════════════════════════════════
-    //  RAY-FACE HIT CALCULATION
-    // ═══════════════════════════════════════════════════════════════════
-
-    /**
-     * Computes a hit position on the given face of {@code neighbor} that
-     * lies on a ray from {@code eyePos} along the player's look direction.
-     *
-     * <p>If the ray doesn't intersect the face cleanly (edge cases with
-     * very oblique angles), falls back to the center of the face, which
-     * is still valid for anticheat since the hit pos is on the block face.
-     */
+    /** Computes a hit position on the given face via ray cast, falling back to face center. */
     private static Vec3d computeRayFaceHit(Vec3d eyePos, float yaw, float pitch,
                                             BlockPos neighbor, Direction face, World world) {
         // Ray direction from yaw/pitch
@@ -1103,16 +958,7 @@ public final class PlacementEngine {
         return MathHelper.clamp(value, min + 0.01, max - 0.01);
     }
 
-    // ═══════════════════════════════════════════════════════════════════
-    //  LOOK PACKET (keeps server rotation in sync with client)
-    // ═══════════════════════════════════════════════════════════════════
-
-    /**
-     * Sends a look-only movement packet to the server <b>without</b>
-     * modifying the client-side entity rotation.  Used in silent-rotation
-     * mode so the server sees the intended look direction while the
-     * player's camera remains untouched.
-     */
+    /** Sends a look packet without modifying client-side rotation. */
     private static void sendSilentLookPacket(ClientPlayerEntity player, float yaw, float pitch) {
         pitch = MathHelper.clamp(pitch, -90.0f, 90.0f);
         /*? if >=1.21.4 {*//*
@@ -1126,11 +972,7 @@ public final class PlacementEngine {
         /*?}*/
     }
 
-    /**
-     * Sets the entity yaw/pitch AND sends a look-only movement packet so
-     * the server's view of the player rotation matches the client before
-     * any interaction/action packets that follow in the same tick.
-     */
+    /** Sets entity yaw/pitch and sends a matching look packet. */
     public static void sendLookPacket(ClientPlayerEntity player, float yaw, float pitch) {
         pitch = MathHelper.clamp(pitch, -90.0f, 90.0f);
         player.setYaw(yaw);
@@ -1146,18 +988,7 @@ public final class PlacementEngine {
         /*?}*/
     }
 
-    // ═══════════════════════════════════════════════════════════════════
-    //  SNEAK INTERACTION HELPER
-    // ═══════════════════════════════════════════════════════════════════
-
-    /**
-     * Temporarily releases sneak overrides and sends a server-synced
-     * release packet so that block-use interactions (opening chests,
-     * placing shulkers) are accepted.
-     *
-     * @return a {@link Runnable} that restores the prior sneak state
-     *         and re-sends the press packet if applicable
-     */
+    /** Releases sneak for interaction; returns a Runnable that restores it. */
     public static Runnable releaseForInteraction(ClientPlayerEntity player) {
         boolean wasAbsoluteSneak = SneakOverride.isForceAbsoluteSneak();
         boolean wasForceSneak = SneakOverride.isForceSneak();
@@ -1175,10 +1006,6 @@ public final class PlacementEngine {
             }
         };
     }
-
-    // ═══════════════════════════════════════════════════════════════════
-    //  SNEAK PACKET HELPERS (separated for cross-tick timing)
-    // ═══════════════════════════════════════════════════════════════════
 
     private static void pressSneakPacket(ClientPlayerEntity player) {
         /*? if >=1.21.8 {*//*
@@ -1202,15 +1029,7 @@ public final class PlacementEngine {
         /*?}*/
     }
 
-    // ═══════════════════════════════════════════════════════════════════
-    //  LOOK RESTORE
-    // ═══════════════════════════════════════════════════════════════════
-
-    /**
-     * Smoothly restores the player's look direction after placement.
-     * Uses interpolation to avoid a jarring snap-back; any subsequent
-     * mouse movement from the player will override this immediately.
-     */
+    /** Smoothly restores look direction after placement. */
     private static void restoreLook(ClientPlayerEntity player) {
         float currentYaw = player.getYaw();
         float currentPitch = player.getPitch();
@@ -1218,12 +1037,11 @@ public final class PlacementEngine {
         float yawDiff = MathHelper.wrapDegrees(savedYaw - currentYaw);
         float pitchDiff = savedPitch - currentPitch;
 
-        // Interpolate most of the way back in one tick (lerp factor 0.65)
-        // — smooth enough to hide jitter, fast enough to feel responsive.
+        // Lerp 65% back toward saved look
         float newYaw = currentYaw + yawDiff * 0.65f;
         float newPitch = currentPitch + pitchDiff * 0.65f;
 
-        // Snap when close enough to avoid lingering drift
+        // Snap if close
         if (Math.abs(yawDiff) < 1.5f && Math.abs(pitchDiff) < 1.5f) {
             newYaw = savedYaw;
             newPitch = savedPitch;
@@ -1232,13 +1050,9 @@ public final class PlacementEngine {
         sendLookPacket(player, newYaw, newPitch);
     }
 
-    // ── inventory helpers ───────────────────────────────────────────────
+    // inventory helpers
 
-    /**
-     * Selects the required item in the player's hotbar.
-     *
-     * @return {@code true} if the item is now in the selected hotbar slot
-     */
+    /** Selects the required item in the hotbar (or swaps from inventory). */
     public static boolean selectItem(ClientPlayerEntity player, MinecraftClient mc,
                                      Item item, boolean allowSwap) {
         PlayerInventory inv = player.getInventory();
@@ -1284,22 +1098,7 @@ public final class PlacementEngine {
         return false;
     }
 
-    /**
-     * Select the best tool in the player's inventory for breaking the
-     * given block state.  Scans the hotbar first, then the main inventory
-     * (swapping into the hotbar if necessary).
-     *
-     * <p>"Best" is the tool with the highest
-     * {@link ItemStack#getMiningSpeedMultiplier(BlockState)} — a pickaxe
-     * for stone, an axe for wood, a shovel for dirt, etc.
-     *
-     * <p>If no tool improves on bare-hand speed (1.0), the current slot
-     * is kept as-is (bare hands are fine for e.g. glass, leaves).
-     *
-     * @param player the client player
-     * @param mc     the client instance
-     * @param state  the block state about to be broken
-     */
+    /** Selects the best tool for breaking the given block. */
     public static void selectBestTool(ClientPlayerEntity player, MinecraftClient mc,
                                        BlockState state) {
         PlayerInventory inv = player.getInventory();
@@ -1360,21 +1159,7 @@ public final class PlacementEngine {
         return contents;
     }
 
-    // ═══════════════════════════════════════════════════════════════════
-    //  ORIENTATION HELPERS
-    // ═══════════════════════════════════════════════════════════════════
-
-    /**
-     * For blocks that derive their facing from the player's horizontal
-     * look direction, returns the yaw the player must face to produce
-     * the desired {@code FACING} property.
-     *
-     * <p>Covers stairs, glazed terracotta, dispensers, observers,
-     * pistons, carved pumpkins, furnaces, and similar blocks.
-     *
-     * @return the required yaw in degrees, or {@code null} if the block
-     *         doesn't use player-facing orientation
-     */
+    /** Returns the yaw needed to produce the desired FACING, or null. */
     private static Float getRequiredYaw(BlockState desired) {
         Block block = desired.getBlock();
 
@@ -1386,8 +1171,7 @@ public final class PlacementEngine {
             }
         }
 
-        // Blocks that use HorizontalFacingBlock.FACING (placed opposite player)
-        // Excludes wall-mounted variants whose facing is set by the clicked face.
+        // Horizontal facing blocks (placed opposite player)
         if (block instanceof GlazedTerracottaBlock
                 || block instanceof CarvedPumpkinBlock
                 || block instanceof AbstractFurnaceBlock
@@ -1395,7 +1179,6 @@ public final class PlacementEngine {
                 || block instanceof StonecutterBlock
                 || block instanceof CraftingTableBlock) {
             if (desired.contains(Properties.HORIZONTAL_FACING)) {
-                // These blocks face opposite to the player's look direction
                 Direction facing = desired.get(Properties.HORIZONTAL_FACING);
                 return directionToYaw(facing.getOpposite());
             }
@@ -1410,8 +1193,7 @@ public final class PlacementEngine {
                 if (facing.getAxis().isHorizontal()) {
                     return directionToYaw(facing.getOpposite());
                 }
-                // UP/DOWN — control via pitch, yaw doesn't matter for these
-                // The pitch is handled elsewhere (adjustHitForHalf or clickFace)
+                // UP/DOWN handled by pitch override
             }
         }
 
@@ -1419,8 +1201,7 @@ public final class PlacementEngine {
         if (block instanceof AnvilBlock) {
             if (desired.contains(Properties.HORIZONTAL_FACING)) {
                 Direction facing = desired.get(Properties.HORIZONTAL_FACING);
-                // Anvils face perpendicular to placement direction
-                return directionToYaw(facing.rotateYClockwise());
+                return directionToYaw(facing.rotateYClockwise()); // perpendicular
             }
         }
 
@@ -1452,10 +1233,9 @@ public final class PlacementEngine {
             }
         }
 
-        // Hoppers — facing is determined by clicked face (handled in
-        // findOrientedPlacementFace), NOT by player yaw.  No override needed.
+        // Hoppers — yaw not used (facing from clicked face)
 
-        // End rods, lightning rods — FACING (all 6)
+        // End rods, lightning rods
         if (block instanceof EndRodBlock || block instanceof LightningRodBlock) {
             if (desired.contains(Properties.FACING)) {
                 Direction facing = desired.get(Properties.FACING);
@@ -1465,9 +1245,8 @@ public final class PlacementEngine {
             }
         }
 
-        // Standing banners, standing signs, hanging signs — ROTATION (0-15)
-        // rotation = floor((180 + yaw) * 16 / 360 + 0.5) & 15
-        // Solving for yaw: yaw = rotation * 22.5 - 180
+        // Rotation-based blocks (banners, signs)
+        // yaw = rotation * 22.5 - 180
         if ((block instanceof AbstractBannerBlock && !(block instanceof WallBannerBlock))
                 || (block instanceof SignBlock && !(block instanceof WallSignBlock))
                 || (block instanceof HangingSignBlock && !(block instanceof WallHangingSignBlock))) {
@@ -1486,9 +1265,7 @@ public final class PlacementEngine {
             }
         }
 
-        // Doors — FACING is set to the player's horizontal facing directly
-        // (NOT opposite), so we return directionToYaw(facing) without
-        // getOpposite().
+        // Doors — facing = player look (not opposite)
         if (block instanceof DoorBlock) {
             if (desired.contains(Properties.HORIZONTAL_FACING)) {
                 Direction facing = desired.get(Properties.HORIZONTAL_FACING);
@@ -1496,8 +1273,7 @@ public final class PlacementEngine {
             }
         }
 
-        // Beds — FACING = direction from foot to head
-        // Player must look in that direction (not opposite)
+        // Beds — facing = foot-to-head direction
         if (block instanceof BedBlock) {
             if (desired.contains(Properties.HORIZONTAL_FACING)) {
                 Direction facing = desired.get(Properties.HORIZONTAL_FACING);
@@ -1505,11 +1281,8 @@ public final class PlacementEngine {
             }
         }
 
-        // ── Catch-all for HORIZONTAL_FACING blocks not listed above ─────
-        // Campfires, beehives, lecterns, grindstones, bells, etc.
+        // Catch-all for other HORIZONTAL_FACING blocks
         if (desired.contains(Properties.HORIZONTAL_FACING)) {
-            // Only apply if not already handled above (PlantBlock, etc.
-            // don't have HORIZONTAL_FACING, so no false positives here)
             if (block instanceof CampfireBlock
                     || block instanceof BeehiveBlock
                     || block instanceof LecternBlock
@@ -1524,18 +1297,7 @@ public final class PlacementEngine {
         return null;
     }
 
-    /**
-     * For blocks that derive their facing from the player's vertical
-     * look direction (pitch), returns the required pitch to produce the
-     * desired {@code FACING} property when it is {@link Direction#UP}
-     * or {@link Direction#DOWN}.
-     *
-     * <p>Covers dispensers, droppers, observers, pistons, barrels,
-     * shulker boxes, end rods, lightning rods, and similar blocks.
-     *
-     * @return the required pitch in degrees, or {@code null} if the
-     *         block doesn't need a pitch override
-     */
+    /** Returns the pitch needed for UP/DOWN facing blocks, or null. */
     private static Float getRequiredPitch(BlockState desired) {
         Block block = desired.getBlock();
 
@@ -1580,28 +1342,17 @@ public final class PlacementEngine {
         return null;
     }
 
-    /**
-     * Adjusts the hit position's Y coordinate so that Minecraft produces
-     * the correct top/bottom half for slabs and stairs.
-     *
-     * <p>When clicking a vertical face:
-     * <ul>
-     *   <li>Hit Y in the <b>lower half</b> → bottom slab / bottom stair</li>
-     *   <li>Hit Y in the <b>upper half</b> → top slab / top stair</li>
-     * </ul>
-     * When clicking the top face → always bottom; bottom face → always top.
-     */
+    /** Adjusts hit Y for correct slab/stair/trapdoor half placement. */
     private static Vec3d adjustHitForHalf(Vec3d hitPos, BlockPos neighbor,
                                           Direction clickSide, BlockState desired) {
         Block block = desired.getBlock();
 
-        // ── Stairs ──────────────────────────────────────────────────────
+        // Stairs
         if (block instanceof StairsBlock && desired.contains(Properties.BLOCK_HALF)) {
             BlockHalf half = desired.get(Properties.BLOCK_HALF);
             if (clickSide == Direction.UP) {
-                // Clicking top face always produces BOTTOM stair — correct for BOTTOM
+                // TOP stair on top face → force upper hit
                 if (half == BlockHalf.TOP) {
-                    // Need to click bottom face or upper portion of side face
                     return forceHitY(hitPos, neighbor, true);
                 }
             } else if (clickSide == Direction.DOWN) {
@@ -1614,7 +1365,7 @@ public final class PlacementEngine {
             }
         }
 
-        // ── Slabs ───────────────────────────────────────────────────────
+        // Slabs
         if (block instanceof SlabBlock && desired.contains(Properties.SLAB_TYPE)) {
             SlabType type = desired.get(Properties.SLAB_TYPE);
             if (type == SlabType.DOUBLE) return hitPos; // double slab — no half
@@ -1629,21 +1380,20 @@ public final class PlacementEngine {
             }
         }
 
-        // ── Trapdoors ───────────────────────────────────────────────────
+        // Trapdoors
         if (block instanceof TrapdoorBlock && desired.contains(Properties.BLOCK_HALF)) {
             BlockHalf half = desired.get(Properties.BLOCK_HALF);
             if (clickSide == Direction.UP) {
-                // Clicking top face → bottom trapdoor. If we want TOP, wrong face.
+                // TOP trapdoor on top face → force upper hit
                 if (half == BlockHalf.TOP) {
                     return forceHitY(hitPos, neighbor, true);
                 }
             } else if (clickSide == Direction.DOWN) {
-                // Clicking bottom face → top trapdoor. If we want BOTTOM, wrong face.
+                // BOTTOM trapdoor on bottom face → force lower hit
                 if (half == BlockHalf.BOTTOM) {
                     return forceHitY(hitPos, neighbor, false);
                 }
             } else {
-                // Side face — control via Y position within the face
                 return forceHitY(hitPos, neighbor, half == BlockHalf.TOP);
             }
         }
@@ -1651,10 +1401,7 @@ public final class PlacementEngine {
         return hitPos;
     }
 
-    /**
-     * Forces the Y component of a hit position to land in the upper or
-     * lower half of the neighbor block's face.
-     */
+    /** Forces hit Y to upper or lower quarter of the block face. */
     private static Vec3d forceHitY(Vec3d hitPos, BlockPos neighbor, boolean upper) {
         double y = upper
                 ? neighbor.getY() + 0.75   // upper quarter of the block
@@ -1662,22 +1409,7 @@ public final class PlacementEngine {
         return new Vec3d(hitPos.x, y, hitPos.z);
     }
 
-    /**
-     * Adjusts the hit position's X or Z component to influence the door
-     * hinge side.  Minecraft's {@code DoorBlock.getHinge()} uses the hit
-     * position as a tiebreaker when neighbouring blocks don't determine
-     * the hinge.  By biasing the hit toward the left or right side of the
-     * block (relative to the door's facing direction) we can steer the
-     * hinge to match the schematic.
-     *
-     * <p>Hinge determination per facing direction:
-     * <ul>
-     *   <li>NORTH: hitX ≤ 0.5 → LEFT, hitX &gt; 0.5 → RIGHT</li>
-     *   <li>SOUTH: hitX ≥ 0.5 → LEFT, hitX &lt; 0.5 → RIGHT</li>
-     *   <li>EAST:  hitZ ≤ 0.5 → LEFT, hitZ &gt; 0.5 → RIGHT</li>
-     *   <li>WEST:  hitZ ≥ 0.5 → LEFT, hitZ &lt; 0.5 → RIGHT</li>
-     * </ul>
-     */
+    /** Adjusts hit X/Z to influence door hinge side. */
     private static Vec3d adjustHitForDoorHinge(Vec3d hitPos, BlockPos neighbor,
                                                 BlockState desired) {
         if (!(desired.getBlock() instanceof DoorBlock)) return hitPos;
@@ -1716,12 +1448,7 @@ public final class PlacementEngine {
         }
     }
 
-    /**
-     * Adjusts the hit position for air placement of half-blocks (stairs,
-     * slabs, trapdoors).  When air-placing, the hit position defaults to
-     * the block center (Y+0.5), which always produces BOTTOM half.
-     * This method shifts it to Y+0.75 for TOP half variants.
-     */
+    /** Adjusts hit Y for air-placed half-blocks (TOP → Y+0.75). */
     private static Vec3d adjustHitForAirPlace(Vec3d hitPos, BlockPos target,
                                               BlockState desired) {
         Block block = desired.getBlock();
@@ -1750,32 +1477,12 @@ public final class PlacementEngine {
         return hitPos;
     }
 
-    /**
-     * Finds an adjacent face to click, with orientation awareness.
-     *
-     * <p>For <b>wall-mounted blocks</b> (wall torches, wall signs, ladders,
-     * etc.), forces the face toward the specific support block dictated by
-     * the desired state's {@code FACING} / {@code HORIZONTAL_FACING}
-     * property.  Returns {@code null} if the required support block is
-     * missing — the caller should skip this candidate and try later.
-     *
-     * <p>For <b>floor-standing variants</b> (standing torches, lanterns,
-     * standing signs), forces face = DOWN so the engine clicks the top
-     * face of the block below.
-     *
-     * <p>For <b>pillar blocks</b> (logs, quartz pillars, basalt, etc.),
-     * prefers a face whose normal matches the desired {@code AXIS} property.
-     *
-     * <p>For all other blocks, delegates to {@link #findPlacementFace}.
-     */
+    /** Finds an adjacent face, with orientation awareness for wall/floor/ceiling blocks. */
     private static Direction findOrientedPlacementFace(World world, BlockPos target,
                                                        BlockState desired) {
         Block block = desired.getBlock();
 
-        // ── Wall-mounted torches ────────────────────────────────────────
-        //  wall_torch, soul_wall_torch, redstone_wall_torch
-        //  HORIZONTAL_FACING = direction the torch points outward from the wall
-        //  Support block is in the OPPOSITE direction.
+        // Wall-mounted torches
         if (block instanceof WallTorchBlock
                 || block instanceof WallRedstoneTorchBlock) {
             if (desired.contains(Properties.HORIZONTAL_FACING)) {
@@ -1785,9 +1492,7 @@ public final class PlacementEngine {
             }
         }
 
-        // ── Standing torches ────────────────────────────────────────────
-        //  torch, soul_torch — must be placed on top of a block below
-        //  RedstoneTorchBlock extends TorchBlock but is NOT a WallTorchBlock
+        // Standing torches
         if (block instanceof TorchBlock && !(block instanceof WallTorchBlock)) {
             return requireSolidFace(world, target, Direction.DOWN);
         }
@@ -1795,9 +1500,7 @@ public final class PlacementEngine {
             return requireSolidFace(world, target, Direction.DOWN);
         }
 
-        // ── Wall signs ──────────────────────────────────────────────────
-        //  HORIZONTAL_FACING = direction the sign face points (away from wall)
-        //  Support block is behind the sign.
+        // Wall signs
         if (block instanceof WallSignBlock || block instanceof WallHangingSignBlock) {
             if (desired.contains(Properties.HORIZONTAL_FACING)) {
                 Direction facing = desired.get(Properties.HORIZONTAL_FACING);
@@ -1805,22 +1508,22 @@ public final class PlacementEngine {
             }
         }
 
-        // ── Standing signs ──────────────────────────────────────────────
+        // Standing signs
         if (block instanceof SignBlock && !(block instanceof WallSignBlock)) {
             return requireSolidFace(world, target, Direction.DOWN);
         }
 
-        // ── Hanging signs (chain-attached below a block) ────────────────
+        // Hanging signs
         if (block instanceof HangingSignBlock && !(block instanceof WallHangingSignBlock)) {
             return requireSolidFace(world, target, Direction.UP);
         }
 
-        // ── Standing banners ────────────────────────────────────────────
+        // Standing banners
         if (block instanceof AbstractBannerBlock && !(block instanceof WallBannerBlock)) {
             return requireSolidFace(world, target, Direction.DOWN);
         }
 
-        // ── Wall banners ────────────────────────────────────────────────
+        // Wall banners
         if (block instanceof WallBannerBlock) {
             if (desired.contains(Properties.HORIZONTAL_FACING)) {
                 Direction facing = desired.get(Properties.HORIZONTAL_FACING);
@@ -1828,8 +1531,7 @@ public final class PlacementEngine {
             }
         }
 
-        // ── Ladders ─────────────────────────────────────────────────────
-        //  FACING = direction the ladder front faces; support block is behind
+        // Ladders
         if (block instanceof LadderBlock) {
             if (desired.contains(Properties.HORIZONTAL_FACING)) {
                 Direction facing = desired.get(Properties.HORIZONTAL_FACING);
@@ -1837,8 +1539,7 @@ public final class PlacementEngine {
             }
         }
 
-        // ── Lanterns ────────────────────────────────────────────────────
-        //  HANGING = true → attached to block above; false → on block below
+        // Lanterns
         if (block instanceof LanternBlock) {
             if (desired.contains(Properties.HANGING) && desired.get(Properties.HANGING)) {
                 return requireSolidFace(world, target, Direction.UP);
@@ -1847,17 +1548,17 @@ public final class PlacementEngine {
             }
         }
 
-        // ── Buttons (wall / floor / ceiling) ────────────────────────────
+        // Buttons (wall / floor / ceiling)
         if (block instanceof ButtonBlock) {
             return resolveWallMountedFace(world, target, desired);
         }
 
-        // ── Levers (wall / floor / ceiling) ─────────────────────────────
+        // Levers (wall / floor / ceiling)
         if (block instanceof LeverBlock) {
             return resolveWallMountedFace(world, target, desired);
         }
 
-        // ── Skulls / heads on walls ─────────────────────────────────────
+        // Skulls / heads on walls
         if (block instanceof WallSkullBlock) {
             if (desired.contains(Properties.HORIZONTAL_FACING)) {
                 Direction facing = desired.get(Properties.HORIZONTAL_FACING);
@@ -1868,10 +1569,7 @@ public final class PlacementEngine {
             return requireSolidFace(world, target, Direction.DOWN);
         }
 
-        // ── Trapdoors ────────────────────────────────────────────────────
-        //  BLOCK_HALF determines attachment: TOP → attached to block above,
-        //  BOTTOM → attached to block below.  HORIZONTAL_FACING = direction
-        //  the trapdoor hinge side faces.
+        // Trapdoors — BLOCK_HALF determines attachment direction
         if (block instanceof TrapdoorBlock) {
             if (desired.contains(Properties.BLOCK_HALF)) {
                 BlockHalf half = desired.get(Properties.BLOCK_HALF);
@@ -1886,49 +1584,35 @@ public final class PlacementEngine {
             return findPlacementFace(world, target);
         }
 
-        // ── Doors ───────────────────────────────────────────────────────
-        //  Place by clicking the top face of the block below.
-        //  Only LOWER half should reach here (UPPER is auto-created).
+        // Doors — click floor (lower half only, upper auto-created)
         if (block instanceof DoorBlock) {
             return requireSolidFace(world, target, Direction.DOWN);
         }
 
-        // ── Beds ────────────────────────────────────────────────────────
-        //  Place by clicking the floor.  FOOT part only (HEAD auto-created).
-        //  Player yaw determines head direction (handled by getRequiredYaw).
+        // Beds — click floor (foot part only, head auto-created)
         if (block instanceof BedBlock) {
             return requireSolidFace(world, target, Direction.DOWN);
         }
 
-        // ── Tall plants ─────────────────────────────────────────────────
-        //  Two-block-tall: place lower half on the floor.
+        // Tall plants — place lower half on floor
         if (block instanceof TallPlantBlock) {
             return requireSolidFace(world, target, Direction.DOWN);
         }
 
-        // Hoppers — facing is determined by clicked face, NOT player yaw.
-        //  HOPPER_FACING = output direction.  Clicking a face places the
-        //  hopper with output toward that face (or DOWN for top/bottom).
+        // Hoppers — facing from clicked face
         if (block instanceof HopperBlock) {
             if (desired.contains(Properties.HOPPER_FACING)) {
                 Direction facing = desired.get(Properties.HOPPER_FACING);
                 if (facing == Direction.DOWN) {
-                    // DOWN hopper — click any horizontal face or below,
-                    // NOT the top face (clicking TOP makes it face down
-                    // anyway, but prefer a solid neighbor).
                     return findPlacementFace(world, target);
                 } else {
-                    // Horizontal hopper — must click the face in the
-                    // output direction so MC assigns that facing.
+                    // Click the face in the output direction
                     return requireSolidFace(world, target, facing);
                 }
             }
         }
 
-        // ── Stairs / Slabs / Trapdoors — prefer side faces ────────────
-        //  When clicking top face → always BOTTOM half; when clicking
-        //  bottom face → always TOP half.  Only side faces allow the
-        //  hit Y position to control top/bottom, so prefer them.
+        // Stairs/Slabs/Trapdoors — prefer side faces for half control
         if (block instanceof StairsBlock
                 || block instanceof SlabBlock
                 || block instanceof TrapdoorBlock) {
@@ -1938,27 +1622,19 @@ public final class PlacementEngine {
             return findPlacementFace(world, target);
         }
 
-        // ── Pillar blocks (logs, quartz pillars, basalt, etc.) ──────────
-        //  Must click a face whose normal matches the desired axis so MC
-        //  assigns the correct AXIS property.  If no such face exists,
-        //  return null to trigger air placement (preserves axis via packet).
+        // Pillar blocks — click face along desired axis
         if (block instanceof PillarBlock && desired.contains(Properties.AXIS)) {
             Direction.Axis desiredAxis = desired.get(Properties.AXIS);
             Direction preferred = preferFaceForAxis(world, target, desiredAxis);
             if (preferred != null) return preferred;
-            // No face along the correct axis — return null so the caller
-            // uses air placement, which defaults to the Y axis.
+            // No matching face — air placement fallback
             return null;
         }
 
         return findPlacementFace(world, target);
     }
 
-    /**
-     * Returns the given direction if there is a solid support block in
-     * that direction from {@code target}.  Returns {@code null} otherwise,
-     * signalling that the block cannot be placed yet (support missing).
-     */
+    /** Returns dir if there's a solid support block in that direction, else null. */
     private static Direction requireSolidFace(World world, BlockPos target, Direction dir) {
         BlockPos neighbor = target.offset(dir);
         BlockState state = world.getBlockState(neighbor);
@@ -1969,12 +1645,7 @@ public final class PlacementEngine {
         return null; // required support block not present
     }
 
-    /**
-     * Resolves the correct placement face for blocks that use the
-     * {@code FACE} property ({@code WallMountLocation}: FLOOR / WALL / CEILING)
-     * combined with {@code HORIZONTAL_FACING}.
-     * <p>Used by buttons and levers.
-     */
+    /** Resolves placement face for FLOOR/WALL/CEILING blocks (buttons, levers). */
     private static Direction resolveWallMountedFace(World world, BlockPos target,
                                                      BlockState desired) {
         if (desired.contains(Properties.BLOCK_FACE)) {
@@ -1994,11 +1665,7 @@ public final class PlacementEngine {
         return findPlacementFace(world, target);
     }
 
-    /**
-     * Tries to find an adjacent solid face whose normal is along
-     * {@code desiredAxis}.  This makes MC place a pillar block along
-     * that axis.
-     */
+    /** Finds a face along the desired axis for pillar block placement. */
     private static Direction preferFaceForAxis(World world, BlockPos target,
                                                Direction.Axis desiredAxis) {
         // Faces whose normal matches the axis
@@ -2019,11 +1686,7 @@ public final class PlacementEngine {
         return null; // no preferred face available — caller falls back to default
     }
 
-    /**
-     * Checks whether two block states of the same block type differ in
-     * orientation-related properties (facing, axis, half, type, etc.).
-     * Used to detect mis-placed blocks that need self-correction.
-     */
+    /** Checks if two states of the same block differ in orientation properties. */
     public static boolean isOrientationMismatch(BlockState existing, BlockState desired) {
         if (existing.getBlock() != desired.getBlock()) return false;
 
@@ -2075,10 +1738,7 @@ public final class PlacementEngine {
         return false;
     }
 
-    /**
-     * Converts a cardinal {@link Direction} to the player yaw (degrees)
-     * that makes the player look in that direction.
-     */
+    /** Converts a cardinal Direction to player yaw in degrees. */
     private static float directionToYaw(Direction dir) {
         return switch (dir) {
             case SOUTH -> 0.0f;
@@ -2089,30 +1749,13 @@ public final class PlacementEngine {
         };
     }
 
-    /**
-     * Computes the pitch angle from {@code eye} toward {@code target}.
-     */
+    /** Computes pitch angle from eye to target. */
     private static float computePitchToward(Vec3d eye, Vec3d target) {
         Vec3d diff = target.subtract(eye);
         double horizDist = Math.sqrt(diff.x * diff.x + diff.z * diff.z);
         return (float) -(MathHelper.atan2(diff.y, horizDist) * (180.0 / Math.PI));
     }
 
-    /**
-     * Snaps a rotation angle to the nearest value reachable by the
-     * player's current mouse sensitivity.
-     *
-     * <p>The Minecraft client quantises yaw/pitch deltas to multiples
-     * of a step size derived from the sensitivity slider.  GrimAC's
-     * {@code SensitivityProcessor} flags rotations whose delta from
-     * the previous server rotation isn't an integer multiple of this
-     * step (the "Greatest Common Divisor" check).  Both GriefKit2 and
-     * Highway-Gooner apply the same formula.
-     *
-     * @param desired        the desired angle (degrees)
-     * @param serverCurrent  the server's current value for this axis
-     * @return the closest GCD-aligned angle to {@code desired}
-     */
     private static float snapToMouseGCD(float desired, float serverCurrent) {
         MinecraftClient mc = MinecraftClient.getInstance();
         double sens = mc.options.getMouseSensitivity().getValue();
@@ -2121,15 +1764,9 @@ public final class PlacementEngine {
         return (float) (desired - (desired - serverCurrent) % gcd);
     }
 
-    // ── placement face finding ──────────────────────────────────────────
+    // placement face finding
 
-    /**
-     * Finds the best adjacent direction whose neighbour has a clickable solid
-     * shape.  Prefers non-interactive neighbours.
-     *
-     * @return direction from {@code target} to the solid neighbour, or
-     *         {@code null} if none exist
-     */
+    /** Finds the best adjacent solid face, preferring non-interactive neighbors. */
     public static Direction findPlacementFace(World world, BlockPos target) {
         Direction fallback = null;
         for (Direction dir : Direction.values()) {
@@ -2147,15 +1784,7 @@ public final class PlacementEngine {
         return fallback;
     }
 
-    /**
-     * Finds an adjacent <b>horizontal</b> (side) face to click, skipping
-     * UP and DOWN.  This is critical for stairs, slabs, and trapdoors
-     * because clicking a top or bottom face locks the half — only side
-     * faces allow the hit Y to control top vs bottom.
-     *
-     * @return a horizontal direction from {@code target} to a solid
-     *         neighbour, or {@code null} if none exist
-     */
+    /** Finds a horizontal side face (no UP/DOWN) for half-block placement. */
     private static Direction findSidePlacementFace(World world, BlockPos target) {
         Direction fallback = null;
         for (Direction dir : new Direction[]{ Direction.NORTH, Direction.SOUTH,
@@ -2172,15 +1801,7 @@ public final class PlacementEngine {
         return fallback;
     }
 
-    /**
-     * Finds an adjacent face to click, <b>strongly</b> preferring
-     * non-interactive blocks.  Falls back to any adjacent solid only
-     * if every neighbor is interactive (or air).
-     *
-     * <p>Used by chests and similar interactive blocks that need to be
-     * placed against a neighbor without accidentally triggering a GUI.
-     * Prefers blocks that don't require sneaking.
-     */
+    /** Finds a non-interactive adjacent face (for chests, etc). */
     private static Direction findNonInteractiveFace(World world, BlockPos target) {
         Direction interactive = null;
         for (Direction dir : Direction.values()) {
@@ -2209,7 +1830,7 @@ public final class PlacementEngine {
         return false;
     }
 
-    // ── interactive block detection ─────────────────────────────────────
+    // interactive block detection
 
     /** Set of block classes that open GUIs / handle interactions on right-click. */
     private static final Set<Class<? extends Block>> INTERACTIVE = Set.of(
@@ -2246,10 +1867,7 @@ public final class PlacementEngine {
             TrapdoorBlock.class
     );
 
-    /**
-     * Returns {@code true} if right-clicking the given block would open a GUI
-     * or toggle state instead of placing against it.
-     */
+    /** Returns true if right-clicking this block opens a GUI or toggles state. */
     public static boolean isInteractive(Block block) {
         for (Class<? extends Block> clazz : INTERACTIVE) {
             if (clazz.isInstance(block)) return true;

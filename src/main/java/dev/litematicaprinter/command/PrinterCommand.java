@@ -102,7 +102,39 @@ public final class PrinterCommand {
                             ChatHelper.info("§cNo schematic loaded.");
                             return 0;
                         }
-                        BlockPos pos = mc.player.getBlockPos();
+
+                        // Primary: correlate against Litematica's SchematicWorld
+                        // to get the exact hologram position.
+                        BlockPos pos = LitematicaDetector.detectAnchorFromSchematicWorld(
+                                printer.getSchematic());
+                        if (pos != null) {
+                            ChatHelper.info("§aAligned anchor from hologram blocks.");
+                        } else {
+                            // Fallback: snap to nearest Litematica placement origin
+                            List<LitematicaDetector.DetectedPlacement> placements =
+                                    SchematicPrinter.detectAllPlacements();
+                            LitematicaDetector.DetectedPlacement bestMatch = null;
+                            double bestDist = Double.MAX_VALUE;
+                            for (LitematicaDetector.DetectedPlacement p : placements) {
+                                double dx = p.originX() - mc.player.getX();
+                                double dz = p.originZ() - mc.player.getZ();
+                                double dist = dx * dx + dz * dz;
+                                if (dist < bestDist) {
+                                    bestDist = dist;
+                                    bestMatch = p;
+                                }
+                            }
+                            if (bestMatch != null && Math.sqrt(bestDist) < 200) {
+                                pos = new BlockPos(
+                                        bestMatch.originX() + printer.getSchematic().getOriginOffsetX(),
+                                        bestMatch.originY() + printer.getSchematic().getOriginOffsetY(),
+                                        bestMatch.originZ() + printer.getSchematic().getOriginOffsetZ());
+                                ChatHelper.info("§aSnapped to Litematica placement origin.");
+                            } else {
+                                pos = mc.player.getBlockPos();
+                            }
+                        }
+
                         printer.setAnchor(pos);
                         ChatHelper.info("Anchor set to §e" + pos.getX() + " " + pos.getY() + " " + pos.getZ());
                         return 1;
@@ -551,37 +583,59 @@ public final class PrinterCommand {
 
             // Try to match Litematica's active placement for this file
             // so the anchor aligns with where the user placed it.
+            // If multiple placements of the same file exist, pick the
+            // one closest to the player.
             String loadedFile = file.getFileName().toString();
             boolean matchedPlacement = false;
             List<LitematicaDetector.DetectedPlacement> placements =
                     SchematicPrinter.detectAllPlacements();
+            LitematicaDetector.DetectedPlacement bestMatch = null;
+            double bestDist = Double.MAX_VALUE;
             for (LitematicaDetector.DetectedPlacement p : placements) {
-                if (p.schematicPath().getFileName().toString().equals(loadedFile)) {
-                    // Sanity-check: warn if the Litematica placement origin
-                    // is at (0,0,0) — almost always means the user forgot to
-                    // move the placement to their build site.
-                    if (p.originX() == 0 && p.originY() == 0 && p.originZ() == 0) {
-                        ChatHelper.info("§e⚠ Litematica placement origin is (0, 0, 0)"
-                                + " — did you move it to the build site?");
-                        ChatHelper.info("§7The anchor will use your current position instead."
-                                + " If this is wrong, move the placement in Litematica"
-                                + " and run §f/printer load §7again.");
-                        break; // Don't use the (0,0,0) origin — keep player position
-                    }
+                if (!p.schematicPath().getFileName().toString().equals(loadedFile)) continue;
+                double dx = p.originX() - mc.player.getX();
+                double dz = p.originZ() - mc.player.getZ();
+                double dist = dx * dx + dz * dz;
+                if (dist < bestDist) {
+                    bestDist = dist;
+                    bestMatch = p;
+                }
+            }
+            if (bestMatch != null) {
+                // Sanity-check: warn if the Litematica placement origin
+                // is at (0,0,0) — almost always means the user forgot to
+                // move the placement to their build site.
+                if (bestMatch.originX() == 0 && bestMatch.originY() == 0 && bestMatch.originZ() == 0) {
+                    ChatHelper.info("§e⚠ Litematica placement origin is (0, 0, 0)"
+                            + " — did you move it to the build site?");
+                    ChatHelper.info("§7The anchor will use your current position instead."
+                            + " If this is wrong, move the placement in Litematica"
+                            + " and run §f/printer load §7again.");
+                } else {
                     anchor = new BlockPos(
-                            p.originX() + printer.getSchematic().getOriginOffsetX(),
-                            p.originY() + printer.getSchematic().getOriginOffsetY(),
-                            p.originZ() + printer.getSchematic().getOriginOffsetZ());
+                            bestMatch.originX() + printer.getSchematic().getOriginOffsetX(),
+                            bestMatch.originY() + printer.getSchematic().getOriginOffsetY(),
+                            bestMatch.originZ() + printer.getSchematic().getOriginOffsetZ());
                     printer.setAnchor(anchor);
                     matchedPlacement = true;
                     ChatHelper.info("§aMatched Litematica placement.");
-                    break;
                 }
             }
 
             if (!matchedPlacement) {
                 ChatHelper.info("§7No Litematica placement found — anchored at your position."
                         + " Use §f/printer here§7 to re-anchor.");
+            }
+
+            // Final correction: correlate against Litematica's SchematicWorld
+            // hologram blocks to get the exact anchor position.
+            BlockPos correlated = LitematicaDetector.detectAnchorFromSchematicWorld(
+                    printer.getSchematic());
+            if (correlated != null) {
+                anchor = correlated;
+                printer.setAnchor(anchor);
+                matchedPlacement = true;
+                ChatHelper.info("§aAnchor aligned from hologram blocks.");
             }
 
             ChatHelper.info("§aLoaded §f" + printer.getSchematic().getName()

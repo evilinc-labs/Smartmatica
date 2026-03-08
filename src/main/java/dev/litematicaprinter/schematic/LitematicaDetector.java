@@ -5,6 +5,10 @@ import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import net.fabricmc.loader.api.FabricLoader;
+import net.minecraft.block.BlockState;
+import net.minecraft.client.MinecraftClient;
+import net.minecraft.util.math.BlockPos;
+import net.minecraft.world.World;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -55,9 +59,18 @@ public final class LitematicaDetector {
      * <b>enabled</b> schematic placement whose {@code .litematic} file
      * still exists on disk.
      *
+     * <p>Tries Litematica's in-memory state first (via reflection), then
+     * falls back to parsing on-disk JSON configs.
+     *
      * @return list of detected placements (may be empty, never null)
      */
     public static List<DetectedPlacement> detectPlacements() {
+        // Primary: read live placements from Litematica's memory.
+        // This works even before Litematica saves its config to disk.
+        List<DetectedPlacement> live = detectFromMemory();
+        if (!live.isEmpty()) return live;
+
+        // Fallback: parse on-disk JSON config files.
         List<DetectedPlacement> results = new ArrayList<>();
 
         Path configDir = FabricLoader.getInstance().getGameDir()
@@ -88,6 +101,80 @@ public final class LitematicaDetector {
     }
 
     // ── internals ───────────────────────────────────────────────────────
+
+    /**
+     * Read Litematica's in-memory placements via reflection.
+     * This works immediately when the user loads/moves a schematic in
+     * Litematica, without waiting for a config save.
+     *
+     * <p>Reflection chain:
+     * {@code DataManager.getSchematicPlacementManager()
+     *     .getAllSchematicsPlacements() → List<SchematicPlacement>}
+     * Each {@code SchematicPlacement} has {@code getOrigin()},
+     * {@code getSchematicFile()}, {@code isEnabled()}, {@code getName()}.
+     */
+    private static List<DetectedPlacement> detectFromMemory() {
+        List<DetectedPlacement> results = new ArrayList<>();
+        try {
+            Class<?> dataManager = Class.forName("fi.dy.masa.litematica.data.DataManager");
+            Object placementMgr = dataManager.getMethod("getSchematicPlacementManager")
+                    .invoke(null);
+            @SuppressWarnings("unchecked")
+            List<?> placements = (List<?>) placementMgr.getClass()
+                    .getMethod("getAllSchematicsPlacements")
+                    .invoke(placementMgr);
+
+            for (Object p : placements) {
+                Class<?> pClass = p.getClass();
+
+                boolean enabled;
+                try {
+                    enabled = (boolean) pClass.getMethod("isEnabled").invoke(p);
+                } catch (NoSuchMethodException e) {
+                    enabled = true;
+                }
+                if (!enabled) continue;
+
+                // getOrigin() → BlockPos
+                Object origin = pClass.getMethod("getOrigin").invoke(p);
+                int ox = (int) origin.getClass().getMethod("getX").invoke(origin);
+                int oy = (int) origin.getClass().getMethod("getY").invoke(origin);
+                int oz = (int) origin.getClass().getMethod("getZ").invoke(origin);
+
+                // getSchematicFile() → File
+                java.io.File schematicFile = (java.io.File) pClass
+                        .getMethod("getSchematicFile").invoke(p);
+                if (schematicFile == null) continue;
+                Path schematicPath = schematicFile.toPath().normalize();
+                if (!schematicPath.toString().endsWith(".litematic")) continue;
+
+                // Don't skip placements whose file is missing on disk —
+                // we still need the origin for anchor alignment.  The
+                // file may have been loaded from memory or a temp path.
+                if (!Files.exists(schematicPath)) {
+                    LOGGER.warn("Litematica placement '{}' file not on disk: {} — including for origin only",
+                            schematicPath.getFileName(), schematicPath);
+                }
+
+                String name;
+                try {
+                    name = (String) pClass.getMethod("getName").invoke(p);
+                } catch (NoSuchMethodException e) {
+                    name = schematicPath.getFileName().toString();
+                }
+
+                results.add(new DetectedPlacement(schematicPath, name, ox, oy, oz));
+                LOGGER.info("Live-detected Litematica placement: '{}' at ({}, {}, {}) file={}",
+                        name, ox, oy, oz, schematicPath);
+            }
+        } catch (ClassNotFoundException e) {
+            // Litematica not present — normal for some setups
+            LOGGER.debug("Litematica classes not found — reflection detection unavailable");
+        } catch (Exception e) {
+            LOGGER.debug("Litematica reflection detection failed: {}", e.getMessage());
+        }
+        return results;
+    }
 
     private static List<DetectedPlacement> parsePlacementFile(Path jsonFile) {
         List<DetectedPlacement> results = new ArrayList<>();
@@ -141,5 +228,146 @@ public final class LitematicaDetector {
         }
 
         return results;
+    }
+
+    // ── SchematicWorld anchor correlation ───────────────────────────────
+
+    /**
+     * Detect the correct anchor by reading blocks directly from
+     * Litematica's in-memory {@code SchematicWorld}.  This is the
+     * "hologram world" — all blocks that the user sees rendered as
+     * transparent overlays exist at their exact world positions in this
+     * synthetic world.
+     *
+     * <p>The method scans blocks near the player in the SchematicWorld,
+     * finds non-air ones, and correlates them against the loaded
+     * schematic to compute the anchor offset.  This does not depend on
+     * Litematica's placement origin logic at all.
+     *
+     * @param schematic the loaded schematic to correlate against
+     * @return the computed anchor, or {@code null} if detection failed
+     */
+    public static BlockPos detectAnchorFromSchematicWorld(LitematicaSchematic schematic) {
+        if (schematic == null) return null;
+
+        MinecraftClient mc = MinecraftClient.getInstance();
+        if (mc.player == null) return null;
+
+        // Access Litematica's SchematicWorld via reflection:
+        // SchematicWorldHandler.getSchematicWorld() → WorldSchematic
+        // WorldSchematic extends World, so getBlockState(BlockPos) works.
+        World schematicWorld;
+        try {
+            Class<?> swh = Class.forName("fi.dy.masa.litematica.world.SchematicWorldHandler");
+            Object world = swh.getMethod("getSchematicWorld").invoke(null);
+            if (world == null) {
+                LOGGER.debug("SchematicWorld is null — no schematic loaded in Litematica");
+                return null;
+            }
+            if (!(world instanceof World)) {
+                LOGGER.warn("SchematicWorld is not a World instance: {}", world.getClass());
+                return null;
+            }
+            schematicWorld = (World) world;
+        } catch (ClassNotFoundException e) {
+            LOGGER.debug("Litematica SchematicWorldHandler not found");
+            return null;
+        } catch (Exception e) {
+            LOGGER.warn("Failed to access SchematicWorld: {}", e.getMessage());
+            return null;
+        }
+
+        BlockPos playerPos = mc.player.getBlockPos();
+        int scanRadius = 64;
+
+        // Phase 1: find non-air blocks in the SchematicWorld near the player.
+        // Collect up to a handful — we only need one to compute the anchor,
+        // but we'll verify with several.
+        List<BlockPos> hologramBlocks = new ArrayList<>();
+        List<BlockState> hologramStates = new ArrayList<>();
+
+        for (int dy = -scanRadius; dy <= scanRadius && hologramBlocks.size() < 20; dy++) {
+            for (int dx = -scanRadius; dx <= scanRadius && hologramBlocks.size() < 20; dx++) {
+                for (int dz = -scanRadius; dz <= scanRadius && hologramBlocks.size() < 20; dz++) {
+                    BlockPos wp = playerPos.add(dx, dy, dz);
+                    BlockState bs = schematicWorld.getBlockState(wp);
+                    if (!bs.isAir()) {
+                        hologramBlocks.add(wp);
+                        hologramStates.add(bs);
+                    }
+                }
+            }
+        }
+
+        if (hologramBlocks.isEmpty()) {
+            LOGGER.info("No hologram blocks found within {} blocks of player", scanRadius);
+            return null;
+        }
+
+        LOGGER.info("Found {} hologram blocks near player — correlating with schematic", hologramBlocks.size());
+
+        // Phase 2: for the first hologram block, search the schematic for
+        // all positions with a matching block state.  Each match gives a
+        // candidate anchor.
+        BlockPos firstWorld = hologramBlocks.get(0);
+        BlockState firstState = hologramStates.get(0);
+
+        List<BlockPos> candidates = new ArrayList<>();
+        for (LitematicaSchematic.Region region : schematic.getRegions()) {
+            for (int y = 0; y < region.absY; y++) {
+                for (int z = 0; z < region.absZ; z++) {
+                    for (int x = 0; x < region.absX; x++) {
+                        BlockState rs = region.getBlockState(x, y, z);
+                        if (rs.equals(firstState)) {
+                            // schematic-local pos = region.origin + (x, y, z)
+                            int sx = region.originX + x;
+                            int sy = region.originY + y;
+                            int sz = region.originZ + z;
+                            // anchor candidate: worldPos - schematicPos
+                            candidates.add(new BlockPos(
+                                    firstWorld.getX() - sx,
+                                    firstWorld.getY() - sy,
+                                    firstWorld.getZ() - sz));
+                        }
+                    }
+                }
+            }
+        }
+
+        if (candidates.isEmpty()) {
+            LOGGER.warn("No schematic position matches hologram block {} at {}",
+                    firstState, firstWorld);
+            return null;
+        }
+
+        // Phase 3: verify each candidate by checking more hologram blocks.
+        // The correct anchor will match ALL hologram blocks.
+        BlockPos bestAnchor = null;
+        int bestScore = 0;
+
+        for (BlockPos candidate : candidates) {
+            int score = 0;
+            for (int i = 0; i < hologramBlocks.size(); i++) {
+                BlockPos wp = hologramBlocks.get(i);
+                BlockState expected = hologramStates.get(i);
+                int sx = wp.getX() - candidate.getX();
+                int sy = wp.getY() - candidate.getY();
+                int sz = wp.getZ() - candidate.getZ();
+                BlockState schematicState = schematic.getBlockState(sx, sy, sz);
+                if (schematicState.equals(expected)) {
+                    score++;
+                }
+            }
+            if (score > bestScore) {
+                bestScore = score;
+                bestAnchor = candidate;
+            }
+        }
+
+        if (bestAnchor != null) {
+            LOGGER.info("Anchor correlated from SchematicWorld: {} (score {}/{})",
+                    bestAnchor, bestScore, hologramBlocks.size());
+        }
+        return bestAnchor;
     }
 }
