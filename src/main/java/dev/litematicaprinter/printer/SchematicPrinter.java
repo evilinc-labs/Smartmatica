@@ -67,7 +67,7 @@ import java.util.*;
  */
 public class SchematicPrinter {
 
-    // ── enums ───────────────────────────────────────────────────────────
+    // enums
 
     public enum SortMode {
         NEAREST,
@@ -88,7 +88,7 @@ public class SchematicPrinter {
         IDLE
     }
 
-    // ── settings ────────────────────────────────────────────────────
+    // settings
 
     private int bps = 4;
     private double range = 4.2;
@@ -98,11 +98,11 @@ public class SchematicPrinter {
     private boolean statusMessages = true;
     private boolean autoBuild = true;
 
-    // ── state ───────────────────────────────────────────────────────────
+    // state
 
     private boolean enabled = false;
 
-    // ── schematic state ─────────────────────────────────────────────────
+    // schematic state
 
     private LitematicaSchematic schematic;
     private BlockPos anchor;
@@ -112,7 +112,7 @@ public class SchematicPrinter {
      *  player switches dimensions (e.g. enters a portal). */
     private RegistryKey<World> buildDimension;
 
-    // ── auto-build state ────────────────────────────────────────────────
+    // auto-build state
 
     private AutoState autoState = AutoState.IDLE;
     private BlockPos lastBuildPos;
@@ -167,13 +167,13 @@ public class SchematicPrinter {
     private int supplyDescentPhase;
     private BlockPos supplyDescentTarget;
 
-    // ── scaffold tracking state ─────────────────────────────────────
+    // scaffold tracking state
     private BlockPos scaffoldBreakTarget;
     private int scaffoldBreakTicks;
     private float scaffoldSavedYaw, scaffoldSavedPitch;
     private static final int MAX_SCAFFOLD_BREAK_TICKS = 60;
 
-    // ── shulker unloading state ─────────────────────────────────────
+    // shulker unloading state
     /** Sub-phase: 0=find, 1=swap, 2=place, 3=wait, 4=open, 5=take, 6=break, 7=breaking, 8=pickup. */
     private int shulkerUnloadPhase;
     private BlockPos shulkerPlacePos;
@@ -202,6 +202,14 @@ public class SchematicPrinter {
 
     private int placementCheckCooldown;
 
+    /** Ticks until next SchematicWorld anchor correlation check.
+     *  Starts at 1 so the first check runs almost immediately after enable. */
+    private int anchorCorrelationCooldown;
+    /** Interval (ticks) between automatic SchematicWorld anchor checks. */
+    private static final int ANCHOR_CORRELATION_INTERVAL = 200;
+    /** Whether the anchor has been confirmed via SchematicWorld correlation. */
+    private boolean anchorCorrelated;
+
     /** True when loaded via Litematica auto-detect (subject to
      *  periodic placement validation and re-detection on enable). */
     private boolean autoDetected;
@@ -215,7 +223,7 @@ public class SchematicPrinter {
     private static final int CHEST_SYNC_DELAY = 3;
     private static final int MAX_RESTOCK_FAILURES = 6;
 
-    // ── cached schematic scan results ───────────────────────────────
+    // cached schematic scan results
     /** How often (in ticks) to recompute the expensive full-schematic
      *  scans for remaining block counts. */
     private static final int REMAINING_CACHE_TTL = 100; // ~5 seconds
@@ -226,7 +234,7 @@ public class SchematicPrinter {
     private long liquidsCacheTick = Long.MIN_VALUE;
     private boolean cachedHasLiquids;
 
-    // ── toggle / lifecycle ──────────────────────────────────────────────
+    // toggle / lifecycle
 
     public boolean isEnabled() { return enabled; }
 
@@ -246,11 +254,11 @@ public class SchematicPrinter {
     private void enable() {
         enabled = true;
 
-        // Re-detect from Litematica when:
-        //  - nothing is loaded yet, OR
-        //  - the current schematic came from auto-detect (may be stale
-        //    if the user unloaded/reloaded in Litematica).
-        // Manually loaded schematics (/printer load) are kept as-is.
+        // Always try to detect / sync with Litematica first.
+        // For fresh sessions (nothing loaded) or stale auto-detects,
+        // do a full re-detect.  For manually loaded schematics, try
+        // to sync the anchor from a matching Litematica placement so
+        // /printer load + Litematica placement stay aligned.
         if (schematic == null || anchor == null || autoDetected) {
             if (tryAutoDetect()) {
                 ChatHelper.labelled("Printer", "§aLoaded §f" + schematic.getName()
@@ -259,15 +267,32 @@ public class SchematicPrinter {
                 ChatHelper.info("§cNo schematic loaded. Use /printer load <file> or load one in Litematica.");
             }
         } else {
-            // Manual load — just resync anchor if a matching Litematica
-            // placement happens to exist (e.g. user also placed it there).
-            trySyncAnchor();
+            // Manual load — only try to resync the anchor from a matching
+            // Litematica placement.  Do NOT call tryAutoDetect() here —
+            // it would replace the manually loaded schematic with a
+            // different one if filenames collide (e.g. two "Unnamed"
+            // builds).  The SchematicWorld correlation on the next tick
+            // will fix the anchor if trySyncAnchor() fails.
+            if (!trySyncAnchor()) {
+                ChatHelper.info("§7Anchor unchanged — SchematicWorld correlation "
+                        + "will auto-align on next tick.");
+            }
         }
+
+        // SchematicWorld anchor correlation runs automatically on the
+        // next tick (anchorCorrelationCooldown = 1) — no need to do it
+        // here.  This avoids delaying enable() with a heavy scan.
 
         if (schematic != null && anchor != null) {
             ChatHelper.info("Printing §a" + schematic.getName()
                     + "§f (" + schematic.getTotalNonAir() + " blocks)");
             ChatHelper.info("Anchor: §e" + anchor.getX() + " " + anchor.getY() + " " + anchor.getZ());
+            int x2 = anchor.getX() + schematic.getSizeX() - 1;
+            int y2 = anchor.getY() + schematic.getSizeY() - 1;
+            int z2 = anchor.getZ() + schematic.getSizeZ() - 1;
+            ChatHelper.info("Region: §7("
+                    + anchor.getX() + ", " + anchor.getY() + ", " + anchor.getZ()
+                    + ") → (" + x2 + ", " + y2 + ", " + z2 + ")");
             warnIfAnchorSuspicious();
             if (autoBuild) { 
                 ChatHelper.info("§bAutoBuild §aenabled §7— walk + restock is automatic.");
@@ -293,8 +318,29 @@ public class SchematicPrinter {
         triedPlacementRestock = false;
         shulkerNoSpaceSkipped = false;
         placementCheckCooldown = 0;
+        anchorCorrelationCooldown = 1; // run on next tick
+        anchorCorrelated = false;
 
         PlacementEngine.clearCorrectionHistory();
+
+        // If the build site is far away (unloaded chunks), start
+        // walking there immediately instead of waiting for the
+        // no-progress timeout cascade.
+        if (autoBuild && schematic != null && anchor != null) {
+            MinecraftClient client = MinecraftClient.getInstance();
+            if (client.world != null && client.player != null) {
+                BlockPos zone = findNextBuildZone(client.player, client.world);
+                if (zone == null) {
+                    // No unbuilt blocks in loaded chunks — check unloaded
+                    BlockPos unloaded = findUnloadedBuildZone(client.player, client.world);
+                    if (unloaded != null) {
+                        ChatHelper.info("§bBuild site not loaded — walking there...");
+                        PathWalker.walkToNearby(unloaded, (int) Math.ceil(range));
+                        autoState = AutoState.WALKING_TO_BUILD;
+                    }
+                }
+            }
+        }
     }
 
     private void disable() {
@@ -312,9 +358,7 @@ public class SchematicPrinter {
         }
     }
 
-    // ═══════════════════════════════════════════════════════════════════
-    //  LITEMATICA AUTO-DETECTION
-    // ═══════════════════════════════════════════════════════════════════
+    // LITEMATICA AUTO-DETECTION
 
     public boolean tryAutoDetect() {
         List<LitematicaDetector.DetectedPlacement> placements =
@@ -359,6 +403,25 @@ public class SchematicPrinter {
         }
 
         LitematicaDetector.DetectedPlacement placement = best;
+
+        // If the schematic file doesn't exist on disk, we can't load it
+        // — but we can still use the origin to set the anchor, provided
+        // a schematic was already loaded via /printer load.
+        if (!Files.exists(placement.schematicPath())) {
+            if (schematic != null) {
+                this.anchor = new BlockPos(
+                        placement.originX() + schematic.getOriginOffsetX(),
+                        placement.originY() + schematic.getOriginOffsetY(),
+                        placement.originZ() + schematic.getOriginOffsetZ());
+                this.autoDetected = true;
+                warnIfAnchorSuspicious();
+                return true;
+            }
+            ChatHelper.info("§cDetected placement file not found on disk: §7"
+                    + placement.schematicPath().getFileName());
+            return false;
+        }
+
         try {
             this.schematic = LitematicaSchematic.load(placement.schematicPath());
             // Litematica's placement origin refers to the schematic's original
@@ -395,40 +458,57 @@ public class SchematicPrinter {
     private boolean trySyncAnchor() {
         if (schematic == null || schematicFile == null) return false;
 
+        MinecraftClient mc = MinecraftClient.getInstance();
         List<LitematicaDetector.DetectedPlacement> placements =
                 LitematicaDetector.detectPlacements();
 
+        // Collect all filename-matching placements and pick the one
+        // closest to the player.  Avoids latching onto a stale
+        // placement on the other side of the world.
+        LitematicaDetector.DetectedPlacement bestMatch = null;
+        double bestDist = Double.MAX_VALUE;
         for (LitematicaDetector.DetectedPlacement p : placements) {
             String placementFile = p.schematicPath().getFileName().toString();
             if (!placementFile.equals(schematicFile)) continue;
 
-            // Don't sync to a (0,0,0) origin if the player is far from it —
-            // that's almost certainly an un-moved default placement.
-            if (p.originX() == 0 && p.originY() == 0 && p.originZ() == 0) {
-                MinecraftClient mc = MinecraftClient.getInstance();
-                if (mc.player != null) {
-                    double dx = p.originX() - mc.player.getX();
-                    double dz = p.originZ() - mc.player.getZ();
-                    if (Math.sqrt(dx * dx + dz * dz) > 100) {
-                        LOGGER.warn("Ignoring anchor sync — placement origin is (0,0,0) and player is far away");
-                        return false;
-                    }
+            double dist = Double.MAX_VALUE;
+            if (mc.player != null) {
+                double dx = p.originX() - mc.player.getX();
+                double dz = p.originZ() - mc.player.getZ();
+                dist = dx * dx + dz * dz;
+            }
+            if (dist < bestDist) {
+                bestDist = dist;
+                bestMatch = p;
+            }
+        }
+
+        if (bestMatch == null) return false;
+
+        // Don't sync to a (0,0,0) origin if the player is far from it —
+        // that's almost certainly an un-moved default placement.
+        if (bestMatch.originX() == 0 && bestMatch.originY() == 0 && bestMatch.originZ() == 0) {
+            if (mc.player != null) {
+                double dx = bestMatch.originX() - mc.player.getX();
+                double dz = bestMatch.originZ() - mc.player.getZ();
+                if (Math.sqrt(dx * dx + dz * dz) > 100) {
+                    LOGGER.warn("Ignoring anchor sync — placement origin is (0,0,0) and player is far away");
+                    return false;
                 }
             }
-
-            BlockPos newAnchor = new BlockPos(
-                    p.originX() + schematic.getOriginOffsetX(),
-                    p.originY() + schematic.getOriginOffsetY(),
-                    p.originZ() + schematic.getOriginOffsetZ());
-
-            if (!newAnchor.equals(anchor)) {
-                ChatHelper.info("§eSynced anchor with Litematica placement → §e"
-                        + newAnchor.getX() + " " + newAnchor.getY() + " " + newAnchor.getZ());
-                this.anchor = newAnchor;
-            }
-            return true;
         }
-        return false;
+
+        BlockPos newAnchor = new BlockPos(
+                bestMatch.originX() + schematic.getOriginOffsetX(),
+                bestMatch.originY() + schematic.getOriginOffsetY(),
+                bestMatch.originZ() + schematic.getOriginOffsetZ());
+
+        if (!newAnchor.equals(anchor)) {
+            ChatHelper.info("§eSynced anchor with Litematica placement → §e"
+                    + newAnchor.getX() + " " + newAnchor.getY() + " " + newAnchor.getZ());
+            this.anchor = newAnchor;
+        }
+        return true;
     }
 
     /**
@@ -485,9 +565,7 @@ public class SchematicPrinter {
         return LitematicaDetector.detectPlacements();
     }
 
-    // ═══════════════════════════════════════════════════════════════════
-    //  SCHEMATIC MANAGEMENT
-    // ═══════════════════════════════════════════════════════════════════
+    // SCHEMATIC MANAGEMENT
 
     public void loadSchematic(Path path, BlockPos anchor) throws IOException {
         this.schematic = LitematicaSchematic.load(path);
@@ -517,11 +595,32 @@ public class SchematicPrinter {
     public boolean isLoaded()                         { return schematic != null && anchor != null; }
     public LitematicaSchematic getSchematic()          { return schematic; }
     public BlockPos getAnchor()                       { return anchor; }
-    public void setAnchor(BlockPos anchor)            { this.anchor = anchor; }
+
+    /**
+     * Updates the build anchor.  If AutoBuild is actively walking to a
+     * build zone, the walk is cancelled and the state machine resets to
+     * BUILDING so the next tick re-evaluates from the new anchor.
+     */
+    public void setAnchor(BlockPos newAnchor) {
+        BlockPos old = this.anchor;
+        this.anchor = newAnchor;
+
+        if (enabled && autoBuild && old != null && newAnchor != null
+                && !old.equals(newAnchor)) {
+            PathWalker.stop();
+            autoState = AutoState.BUILDING;
+            noProgressTicks = 0;
+            failedZones.clear();
+            lastWalkTargetZone = null;
+            walkFailCount = 0;
+            triedPlacementWalk = false;
+        }
+    }
+
     public int getBlocksPlaced()                      { return blocksPlaced; }
     public AutoState getAutoState()                   { return autoState; }
 
-    // ── settings accessors ──────────────────────────────────────────────
+    // settings accessors
 
     public int getBps()                 { return bps; }
     public void setBps(int bps)        { this.bps = Math.max(1, Math.min(9, bps)); }
@@ -538,9 +637,7 @@ public class SchematicPrinter {
     public boolean isAutoBuild()       { return autoBuild; }
     public void setAutoBuild(boolean v){ this.autoBuild = v; }
 
-    // ═══════════════════════════════════════════════════════════════════
-    //  TICK (called from mod initializer)
-    // ═══════════════════════════════════════════════════════════════════
+    // TICK (called from mod initializer)
 
     public void tick() {
         if (!enabled) return;
@@ -566,18 +663,44 @@ public class SchematicPrinter {
         // conflicting rotation states that cause server rubberbanding.
         // Also cap BPS to 4 — manual mode shares the connection with the
         // player's own interactions so a lower budget is safer.
+        PlacementEngine.setBps(bps);
         if (autoBuild) {
-            PlacementEngine.setBps(bps);
             PlacementEngine.setSilentRotation(false);
         } else {
-            PlacementEngine.setBps(Math.min(bps, 4));
             PlacementEngine.setSilentRotation(true);
         }
 
-        // ── Periodic maintenance (every ~200 ticks ≈ 10 s) ───────────
+        // Periodic maintenance (every ~200 ticks ≈ 10 s)
         if (mc.world.getTime() % 200 == 0) {
             PrinterDatabase.flushScaffoldIfDirty();
             PlacementEngine.pruneCompletedCorrections();
+        }
+
+        // Automatic SchematicWorld anchor correlation.
+        // On first tick after enable (cooldown=1) and then every
+        // ANCHOR_CORRELATION_INTERVAL ticks, read hologram blocks
+        // from Litematica's SchematicWorld and adjust the anchor.
+        if (schematic != null && --anchorCorrelationCooldown <= 0) {
+            anchorCorrelationCooldown = ANCHOR_CORRELATION_INTERVAL;
+            BlockPos correlated = LitematicaDetector.detectAnchorFromSchematicWorld(schematic);
+            if (correlated != null) {
+                if (!correlated.equals(anchor)) {
+                    this.anchor = correlated;
+                    if (statusMessages) {
+                        ChatHelper.info("§aAnchor auto-aligned from hologram blocks → §e"
+                                + correlated.getX() + " " + correlated.getY() + " " + correlated.getZ());
+                    }
+                    // Reset walk state so Baritone targets the new anchor
+                    PathWalker.stop();
+                    if (autoBuild) {
+                        autoState = AutoState.BUILDING;
+                        noProgressTicks = 0;
+                        failedZones.clear();
+                        lastWalkTargetZone = null;
+                    }
+                }
+                anchorCorrelated = true;
+            }
         }
 
         // Always drive the multi-tick placement pipeline
@@ -607,12 +730,10 @@ public class SchematicPrinter {
         }
     }
 
-    // ═══════════════════════════════════════════════════════════════════
-    //  AUTO-BUILD STATE MACHINE
-    // ═══════════════════════════════════════════════════════════════════
+    // AUTO-BUILD STATE MACHINE
 
     private void tickAutoBuild(MinecraftClient mc) {
-        // ── safety guards: dead player or wrong dimension ───────────
+        // safety guards: dead player or wrong dimension
         if (mc.player == null || mc.world == null) return;
         if (mc.player.isDead()) {
             PlacementEngine.reset();
@@ -644,7 +765,7 @@ public class SchematicPrinter {
         if (!PlacementEngine.canPlace()) return;
         if (missingItemMsgCooldown > 0) missingItemMsgCooldown--;
 
-        // ── entrapment safety ───────────────────────────────────────
+        // entrapment safety
         // If the player has no horizontal exit, stop building and try
         // to navigate to a safe position before continuing.
         if (isPlayerTrapped(mc.player, mc.world)) {
@@ -681,7 +802,7 @@ public class SchematicPrinter {
             return;
         }
 
-        // ── nothing was placed this tick ────────────────────────────
+        // nothing was placed this tick
 
         // Case 1: blocks exist nearby but we lack the items for ALL of them
         if (!lastMissingItems.isEmpty()) {
@@ -698,7 +819,16 @@ public class SchematicPrinter {
             // failed yet — the miss might be transient (player settling after
             // a walk, blocks temporarily out of angle, etc.).
             if (noProgressTicks == 10 && walkAttemptCooldown <= 0) {
-                tryWalkToNextZone(mc);
+                if (!tryWalkToNextZone(mc)) {
+                    // No loaded zones — check for unloaded build zones
+                    // so we start walking immediately instead of waiting
+                    // for the full stuck-cycle cascade.
+                    BlockPos unloaded = findUnloadedBuildZone(mc.player, mc.world);
+                    if (unloaded != null) {
+                        PathWalker.walkToNearby(unloaded, (int) Math.ceil(range));
+                        autoState = AutoState.WALKING_TO_BUILD;
+                    }
+                }
             }
             return;
         }
@@ -778,7 +908,7 @@ public class SchematicPrinter {
                     return;
                 }
 
-                // ── Chunk-loading awareness ─────────────────────────
+                // Chunk-loading awareness
                 // All loaded chunks are done, but there may be unbuilt
                 // blocks in unloaded parts of the schematic.  Walk
                 // toward the nearest unloaded region so it loads.
@@ -975,7 +1105,7 @@ public class SchematicPrinter {
 
     private void tickWalking(MinecraftClient mc, AutoState arrivalState) {
         if (!PathWalker.isActive()) {
-            // ── multi-phase descent continuation ────────────────────
+            // multi-phase descent continuation
             // walkToZoneWithPlacement may have set up a descent for
             // WALKING_BACK or WALKING_TO_BUILD.  Handle phase transitions
             // the same way tickWalkingToSupply does.
@@ -1059,7 +1189,7 @@ public class SchematicPrinter {
                 }
                 walkFailCount = 0;
 
-                // ── close-enough bail-out ────────────────────────────
+                // close-enough bail-out
                 // All walk retries exhausted.  If the player is already
                 // close enough to the target, fall back to building
                 // from here rather than escalating further.
@@ -1116,7 +1246,7 @@ public class SchematicPrinter {
             }
             return;
         }
-        // ── Opportunistic build check ────────────────────────────────
+        // Opportunistic build check
         // If Baritone has been working for 30+ ticks (1.5 s) and the
         // player is already within reach of the target, Baritone is
         // probably stalled on a short path it can't compute.  Cancel
@@ -1238,13 +1368,13 @@ public class SchematicPrinter {
     private void tickCleaningScaffold(MinecraftClient mc) {
         if (mc.player == null || mc.interactionManager == null || mc.world == null) return;
 
-        // ── walking to a scaffold block ─────────────────────────────
+        // walking to a scaffold block
         if (PathWalker.isActive()) {
             PathWalker.tick();
             return;
         }
 
-        // ── currently breaking a scaffold block ─────────────────────
+        // currently breaking a scaffold block
         if (scaffoldBreakTarget != null) {
             BlockState current = mc.world.getBlockState(scaffoldBreakTarget);
             if (current.isAir() || current.isReplaceable()) {
@@ -1285,7 +1415,7 @@ public class SchematicPrinter {
             return;
         }
 
-        // ── pick next scaffold block ────────────────────────────────
+        // pick next scaffold block
         if (!PrinterDatabase.hasScaffold()) {
             // All scaffold cleaned up
             if (statusMessages) {
@@ -1397,7 +1527,7 @@ public class SchematicPrinter {
                 return;
             }
 
-            // ── multi-phase descent continuation ────────────────────
+            // multi-phase descent continuation
             // Phase 1 complete (horizontal walk) → start phase 2 (descend)
             if (supplyDescentPhase == 1 && supplyDescentTarget != null) {
                 supplyDescentPhase = 2;
@@ -1457,9 +1587,7 @@ public class SchematicPrinter {
                 }
             }
 
-            // ── elevation-aware retry: use walkToZoneWithPlacement
-            //    which properly handles large elevation differences
-            //    by separating horizontal and vertical phases. ────────
+            // Elevation-aware retry
             if (!triedLinearRestock && supplyTarget != null) {
                 triedLinearRestock = true;
                 double retryDy = Math.abs(supplyTarget.getY()
@@ -1481,9 +1609,7 @@ public class SchematicPrinter {
                 }
             }
 
-            // ── direct placement retry: final attempt without
-            //    waypoints — if the player got closer from earlier
-            //    attempts, a direct A* may now succeed. ──────────────
+            // Direct placement retry
             if (!triedPlacementRestock && supplyTarget != null) {
                 triedPlacementRestock = true;
                 LOGGER.debug("Retrying with direct placement walk");
@@ -1660,9 +1786,7 @@ public class SchematicPrinter {
         }
     }
 
-    // ═══════════════════════════════════════════════════════════════════
-    //  SHULKER UNLOADING — place → open → take items → break → pickup
-    // ═══════════════════════════════════════════════════════════════════
+    // SHULKER UNLOADING — place → open → take items → break → pickup
 
     /**
      * Finds the first shulker box in the player's inventory (slots 0-35)
@@ -1741,7 +1865,7 @@ public class SchematicPrinter {
         BlockPos standingOn = playerFeet.down();
         PlayerInventory inv = player.getInventory();
 
-        // ── Find a solid block in inventory to use as platform ──────
+        // Find a solid block in inventory to use as platform
         // Prefer cheap/common blocks.  Avoid shulker boxes themselves.
         int blockSlot = -1;
         for (int i = 0; i < 36; i++) {
@@ -1758,7 +1882,7 @@ public class SchematicPrinter {
         }
         if (blockSlot < 0) return false; // no suitable block
 
-        // ── Find a placement position ───────────────────────────────
+        // Find a placement position
         // Search at multiple Y levels around the player, not just
         // standingOn's Y.  Also search adjacent to any previously
         // placed platform block so multi-attempt extensions work.
@@ -1814,7 +1938,7 @@ public class SchematicPrinter {
         }
         if (placeTarget == null || placeFace == null) return false;
 
-        // ── Rotate toward the target before placing ─────────────────
+        // Rotate toward the target before placing
         Vec3d eyePos = player.getEyePos();
         BlockPos clickBlock = placeTarget.offset(placeFace.getOpposite());
         Vec3d clickCenter = Vec3d.ofCenter(clickBlock);
@@ -1827,7 +1951,7 @@ public class SchematicPrinter {
         PlacementEngine.sendLookPacket(player, platYaw,
                 MathHelper.clamp(platPitch, -90.0f, 90.0f));
 
-        // ── Swap the block into the current hotbar slot ─────────────
+        // Swap the block into the current hotbar slot
         /*? if >=1.21.5 {*//*
         int currentSlot = inv.getSelectedSlot();
         *//*?} else {*/
@@ -1847,7 +1971,7 @@ public class SchematicPrinter {
             /*?}*/
         }
 
-        // ── Place the block ─────────────────────────────────────────
+        // Place the block
         Runnable restoreSneak = PlacementEngine.releaseForInteraction(player);
 
         BlockHitResult hit = new BlockHitResult(
@@ -1859,7 +1983,7 @@ public class SchematicPrinter {
 
         restoreSneak.run();
 
-        // ── Swap original item back if we displaced it ──────────────
+        // Swap original item back if we displaced it
         if (blockSlot >= 9) {
             mc.interactionManager.clickSlot(
                     player.currentScreenHandler.syncId,
@@ -1901,7 +2025,7 @@ public class SchematicPrinter {
         shulkerUnloadTicks++;
         shulkerTotalTicks++;
 
-        // ── Global safety timeout — prevents unbreakable loops ──────
+        // Global safety timeout — prevents unbreakable loops
         if (shulkerTotalTicks >= MAX_SHULKER_TOTAL_TICKS) {
             if (statusMessages) {
                 ChatHelper.info("§c⚠ Shulker unloading timed out — aborting.");
@@ -1918,7 +2042,7 @@ public class SchematicPrinter {
 
         switch (shulkerUnloadPhase) {
 
-            // ── Phase 0: Find a shulker in inventory ────────────────
+            // Phase 0: Find a shulker in inventory
             case 0 -> {
                 if (shulkerUnloadFailures >= MAX_SHULKER_FAILURES) {
                     if (statusMessages) {
@@ -1972,7 +2096,7 @@ public class SchematicPrinter {
                 shulkerUnloadTicks = 0;
             }
 
-            // ── Phase 1: Select/swap shulker into hotbar ────────────
+            // Phase 1: Select/swap shulker into hotbar
             //    Must be a separate tick from placement so the server
             //    processes the slot change before we try to use it.
             case 1 -> {
@@ -2002,7 +2126,7 @@ public class SchematicPrinter {
                 shulkerUnloadTicks = 0;
             }
 
-            // ── Phase 2: Place the shulker on the ground ────────────
+            // Phase 2: Place the shulker on the ground
             case 2 -> {
                 // Wait at least 2 ticks after swap for server sync
                 if (shulkerUnloadTicks < 2) return;
@@ -2060,7 +2184,7 @@ public class SchematicPrinter {
                 shulkerUnloadTicks = 0;
             }
 
-            // ── Phase 3: Wait for placement to register ─────────────
+            // Phase 3: Wait for placement to register
             case 3 -> {
                 BlockState st = world.getBlockState(shulkerPlacePos);
                 if (st.getBlock() instanceof ShulkerBoxBlock) {
@@ -2079,7 +2203,7 @@ public class SchematicPrinter {
                 }
             }
 
-            // ── Phase 4: Open the placed shulker ────────────────────
+            // Phase 4: Open the placed shulker
             case 4 -> {
                 // Rotate to look at the shulker before interacting so the
                 // server's line-of-sight / facing checks accept the request.
@@ -2117,7 +2241,7 @@ public class SchematicPrinter {
                 shulkerSyncDelay = 0;
             }
 
-            // ── Phase 5: Take needed items from the shulker screen ──
+            // Phase 5: Take needed items from the shulker screen
             case 5 -> {
                 ScreenHandler handler = player.currentScreenHandler;
                 // Shulker boxes use ShulkerBoxScreenHandler, NOT GenericContainerScreenHandler
@@ -2200,7 +2324,7 @@ public class SchematicPrinter {
                 }
             }
 
-            // ── Phase 6: Start breaking the placed shulker ──────────
+            // Phase 6: Start breaking the placed shulker
             case 6 -> {
                 // Make sure screen is closed
                 if (mc.currentScreen != null) {
@@ -2232,7 +2356,7 @@ public class SchematicPrinter {
                 shulkerUnloadTicks = 0;
             }
 
-            // ── Phase 7: Continue breaking until shulker drops ──────
+            // Phase 7: Continue breaking until shulker drops
             case 7 -> {
                 BlockState st = world.getBlockState(shulkerPlacePos);
                 if (!(st.getBlock() instanceof ShulkerBoxBlock)) {
@@ -2272,7 +2396,7 @@ public class SchematicPrinter {
                 player.swingHand(Hand.MAIN_HAND);
             }
 
-            // ── Phase 8: Wait for item entity pickup ────────────────
+            // Phase 8: Wait for item entity pickup
             case 8 -> {
                 if (shulkerUnloadTicks >= SHULKER_PICKUP_DELAY) {
                     // Verify inventory has a shulker (i.e. the item was
@@ -2530,9 +2654,7 @@ public class SchematicPrinter {
         return best;
     }
 
-    // ═══════════════════════════════════════════════════════════════════
-    //  INVENTORY & RESTOCK
-    // ═══════════════════════════════════════════════════════════════════
+    // INVENTORY & RESTOCK
 
     private boolean shouldRestock(ClientPlayerEntity player, World world) {
         if (PrinterDatabase.chestCount() == 0) return false;
@@ -2574,7 +2696,7 @@ public class SchematicPrinter {
             return;
         }
 
-        // ── Check if shulkers in inventory already have what we need ──
+        // Check if shulkers in inventory already have what we need
         // Before walking to a supply chest, see if the player is already
         // carrying shulker boxes with the required materials.  If so,
         // skip the supply walk entirely and go straight to unloading.
@@ -2680,7 +2802,7 @@ public class SchematicPrinter {
      *         no useful intermediates were found)
      */
     private List<BlockPos> computeSupplyWaypoints(BlockPos from, BlockPos to) {
-        // ── 1. Collect all known positions from the database ────────
+        // 1. Collect all known positions from the database
         List<BlockPos> candidates = new ArrayList<>();
 
         // Other registered chests (not the target itself)
@@ -2702,7 +2824,7 @@ public class SchematicPrinter {
             return new ArrayList<>(List.of(to.toImmutable()));
         }
 
-        // ── 2. Build a greedy nearest-neighbour chain ───────────────
+        // 2. Build a greedy nearest-neighbour chain
         //  Starting from the player, repeatedly pick the candidate
         //  that is (a) closest to the current position and (b) makes
         //  forward progress toward the target (closer to target than
@@ -2753,7 +2875,7 @@ public class SchematicPrinter {
             if (currentDistToTarget < 15.0) break;
         }
 
-        // ── 3. Always end at the chest ──────────────────────────────
+        // 3. Always end at the chest
         waypoints.add(to.toImmutable());
 
         return waypoints;
@@ -2840,7 +2962,7 @@ public class SchematicPrinter {
         List<BlockPos> legs = new ArrayList<>();
 
         if (vertDist > 8 && dy > 0) {
-            // ── ASCENDING: horizontal first, then pillar up ────────
+            // ASCENDING: horizontal first, then pillar up
             // Walk at the current elevation to the target's XZ column,
             // then climb in 8-block steps.  Works regardless of
             // whether the path is vertical-dominant or not — any 
@@ -2870,7 +2992,7 @@ public class SchematicPrinter {
             legs.add(target.toImmutable());
 
         } else if (vertDist > 8 && dy < 0) {
-            // ── DESCENDING: 3-phase approach ───────────────────────
+            // DESCENDING: 3-phase approach
             // Phase 1: walk horizontally at CURRENT elevation to the
             //   target's XZ column.  The player is on the scaffold /
             //   build platform which provides walkable terrain.
@@ -2904,7 +3026,7 @@ public class SchematicPrinter {
             }
 
         } else {
-            // ── HORIZONTAL / MODERATE: linear interpolation ────────
+            // HORIZONTAL / MODERATE: linear interpolation
             int legLength;
             if (totalDist > 80) {
                 legLength = 32;
@@ -2985,9 +3107,7 @@ public class SchematicPrinter {
         return needed;
     }
 
-    // ═══════════════════════════════════════════════════════════════════
-    //  CHEST INTERACTION
-    // ═══════════════════════════════════════════════════════════════════
+    // CHEST INTERACTION
 
     private boolean tryOpenChest(MinecraftClient mc, BlockPos chestPos) {
         if (mc.player == null || mc.interactionManager == null) return false;
@@ -3078,7 +3198,7 @@ public class SchematicPrinter {
 
         int chestSlots = handler.getRows() * 9;
 
-        // ── Pass 0: return unneeded shulkers to the chest ───────────
+        // Pass 0: return unneeded shulkers to the chest
         // Shulker boxes from previous unload cycles may still be in the
         // player's inventory.  Deposit any that no longer contain needed
         // items so they don't waste inventory slots.  In the container
@@ -3097,7 +3217,7 @@ public class SchematicPrinter {
                     SlotActionType.QUICK_MOVE, player);
         }
 
-        // ── Pass 1: grab all loose (non-shulker) needed items ───────
+        // Pass 1: grab all loose (non-shulker) needed items
         for (int slot = 0; slot < chestSlots; slot++) {
             ItemStack stack = handler.getSlot(slot).getStack();
             if (stack.isEmpty()) continue;
@@ -3110,7 +3230,7 @@ public class SchematicPrinter {
             }
         }
 
-        // ── Pass 2: grab at most ONE shulker that has needed items ──
+        // Pass 2: grab at most ONE shulker that has needed items
         // Taking only one shulker per chest visit prevents inventory
         // flooding.  The unloading state machine will empty it, then
         // the printer can come back for another shulker if still needed.
@@ -3144,9 +3264,7 @@ public class SchematicPrinter {
         return false;
     }
 
-    // ═══════════════════════════════════════════════════════════════════
-    //  NAVIGATION HELPERS
-    // ═══════════════════════════════════════════════════════════════════
+    // NAVIGATION HELPERS
 
     private BlockPos findNextBuildZone(ClientPlayerEntity player, World world) {
         if (player == null || world == null) return null;
@@ -3275,9 +3393,7 @@ public class SchematicPrinter {
         return best;
     }
 
-    // ═══════════════════════════════════════════════════════════════════
-    //  PLACEMENT HELPERS
-    // ═══════════════════════════════════════════════════════════════════
+    // PLACEMENT HELPERS
 
     /**
      * Formats a {@code Set<Item>} into a readable chat string, showing
@@ -3850,9 +3966,7 @@ public class SchematicPrinter {
         return !isEffectivelyPlaced(world.getBlockState(worldPos), expected);
     }
 
-    // ═══════════════════════════════════════════════════════════════════
-    //  ENTRAPMENT SAFETY
-    // ═══════════════════════════════════════════════════════════════════
+    // ENTRAPMENT SAFETY
 
     /** Cardinal directions the player can walk through. */
     private static final Direction[] HORIZONTALS = {
@@ -4062,9 +4176,7 @@ public class SchematicPrinter {
         return best;
     }
 
-    // ═══════════════════════════════════════════════════════════════════
-    //  CORE PLACEMENT
-    // ═══════════════════════════════════════════════════════════════════
+    // CORE PLACEMENT
 
     private int placeDebugCooldown = 0;
 
@@ -4166,7 +4278,7 @@ public class SchematicPrinter {
             return false;
         }
 
-        // ── Dependency-aware sorting ────────────────────────────────
+        // Dependency-aware sorting
         // Freestanding blocks (tier 0) are tried before blocks that need
         // adjacent support (tier 1: torches, flowers, rails, etc.).  This
         // ensures support structures are built before dependent blocks
@@ -4207,13 +4319,17 @@ public class SchematicPrinter {
         BlockState dbgFirstPlaceFailTarget = null;
         BlockState dbgFirstPlaceFailExisting = null;
 
+        List<BlockPos>   batchTargets = null;
+        List<BlockState> batchStates  = null;
+        Item             batchItem    = null;
+
         for (BlockPos worldPos : candidates) {
             int sx = worldPos.getX() - anchor.getX();
             int sy = worldPos.getY() - anchor.getY();
             int sz = worldPos.getZ() - anchor.getZ();
             BlockState target = schematic.getBlockState(sx, sy, sz);
 
-            // ── Dependency check: skip blocks whose support is missing ──
+            // Dependency check: skip blocks whose support is missing
             // Torches without a wall, flowers without a floor, rails
             // without ground, etc. are silently skipped.  They will be
             // retried once their support blocks have been placed.
@@ -4222,7 +4338,7 @@ public class SchematicPrinter {
                 continue;
             }
 
-            // ── Skip blocks whose materials we already gave up on ───
+            // Skip blocks whose materials we already gave up on
             // If restock failed and this item was marked skipped, don't
             // waste time trying — move on to blocks we CAN place.
             if (!skippedItems.isEmpty()) {
@@ -4232,7 +4348,7 @@ public class SchematicPrinter {
                 if (reqItem != null && skippedItems.contains(reqItem)) continue;
             }
 
-            // ── liquid source block → bucket placement ──────────────
+            // liquid source block → bucket placement
             if (isLiquidSource(target)) {
                 Item bucketItem = getLiquidBucketItem(target);
                 if (bucketItem == null) continue;
@@ -4257,7 +4373,7 @@ public class SchematicPrinter {
                 continue;
             }
 
-            // ── normal block placement ──────────────────────────────
+            // normal block placement
             Item requiredItem = target.getBlock().asItem();
             // Skip items we already know are missing (avoid redundant hotbar scans)
             if (missing.contains(requiredItem)) continue;
@@ -4275,6 +4391,19 @@ public class SchematicPrinter {
                     return true;
                 }
                 // PlacementEngine busy or can't start — skip for now
+                continue;
+            }
+
+            if (batchTargets == null && PlacementEngine.canBatchPlace()) {
+                batchTargets = new ArrayList<>(9);
+                batchStates  = new ArrayList<>(9);
+                batchItem    = requiredItem;
+            }
+            if (batchTargets != null
+                    && batchTargets.size() < 9
+                    && requiredItem == batchItem) {
+                batchTargets.add(worldPos.toImmutable());
+                batchStates.add(target);
                 continue;
             }
 
@@ -4303,6 +4432,15 @@ public class SchematicPrinter {
             }
         }
 
+        if (batchTargets != null && !batchTargets.isEmpty()) {
+            int placed = PlacementEngine.placeBatch(batchTargets, batchStates, swapItems);
+            if (placed > 0) {
+                lastMissingItems.clear();
+                placeDebugCooldown = 0;
+                return true;
+            }
+        }
+
         // Debug output when candidates exist but no placement started
         if (LOGGER.isDebugEnabled() && statusMessages && !candidates.isEmpty() && placeDebugCooldown <= 0) {
             placeDebugCooldown = 100;
@@ -4328,9 +4466,7 @@ public class SchematicPrinter {
         return false;
     }
 
-    // ═══════════════════════════════════════════════════════════════════
-    //  UTILITY / STATUS
-    // ═══════════════════════════════════════════════════════════════════
+    // UTILITY / STATUS
 
     public int countRemaining() {
         if (!isLoaded()) return -1;
@@ -4390,9 +4526,7 @@ public class SchematicPrinter {
         return net.fabricmc.loader.api.FabricLoader.getInstance().getGameDir().resolve("schematics");
     }
 
-    // ═══════════════════════════════════════════════════════════════════
-    //  CHECKPOINT / RESUME
-    // ═══════════════════════════════════════════════════════════════════
+    // CHECKPOINT / RESUME
 
     public void saveCheckpoint() {
         if (schematicFile != null && anchor != null) {
@@ -4413,9 +4547,7 @@ public class SchematicPrinter {
 
     public String getSchematicFile() { return schematicFile; }
 
-    // ═══════════════════════════════════════════════════════════════════
-    //  MATERIALS REPORT
-    // ═══════════════════════════════════════════════════════════════════
+    // MATERIALS REPORT
 
     public PrinterResourceManager.MaterialsReport analyzeMaterials() {
         if (!isLoaded()) return PrinterResourceManager.MaterialsReport.EMPTY;
