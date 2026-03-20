@@ -1,8 +1,8 @@
-# MOAR — Minecraft Orchestrated Automation & Response
+# Minecraft Orchestrated Automation & Response
 
 A standalone Fabric client mod for automated block placement, spawn-proofing, and container indexing. Built for everyone.
 
-> **Beta** — It works, but expect rough edges. File an issue for bugs or open a PR to improve things.
+> **Early Version Advisory** — It works, but expect rough edges. File an issue for bugs or open a PR to improve things.
 
 ## Featurets
 
