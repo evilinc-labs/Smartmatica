@@ -1,4 +1,4 @@
-# Smartmatica
+# MOAR (Minecraft Orchestrated Automation & Response)
 
 A standalone Fabric client mod that automatically places blocks from loaded `.litematic` schematics. Built and designed for all, for everyone's sake. I missed a public Litematica printer, didn't you?
 
@@ -72,7 +72,7 @@ If you find a fork or branch that is in violation of the license, please inform 
 
 1. Install [Fabric Loader](https://fabricmc.net/use/) for your Minecraft version
 2. Download [Fabric API](https://modrinth.com/mod/fabric-api) and place it in your `mods/` folder
-3. Download the Smartmatica `.jar` for your MC version and place it in your `mods/` folder
+3. Download the MOAR `.jar` for your MC version and place it in your `mods/` folder
 4. *(Optional)* Install [Baritone](https://github.com/cabaletta/baritone/releases) (Fabric build) for proper pathfinding
 
 ## Usage
@@ -126,15 +126,15 @@ All commands use the `/printer` prefix:
 
 Build artifacts are placed in each version's `build/libs/` directory:
 ```
-versions/1.21.1/build/libs/smartmatica-1.0.0+1.21.1.jar
-versions/1.21.4/build/libs/smartmatica-1.0.0+1.21.4.jar
+versions/1.21.1/build/libs/moar-1.1.0+1.21.1.jar
+versions/1.21.4/build/libs/moar-1.1.0+1.21.4.jar
 ...
 ```
 
 To collect all version JARs into one folder:
 ```bash
 ./gradlew buildAndCollect
-# Output: build/libs/1.0.0/
+# Output: build/libs/1.1.0/
 ```
 
 ### Build System

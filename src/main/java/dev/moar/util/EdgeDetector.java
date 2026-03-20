@@ -1,4 +1,4 @@
-package dev.smartmatica.util;
+package dev.moar.util;
 
 import net.minecraft.client.network.ClientPlayerEntity;
 import net.minecraft.util.math.BlockPos;

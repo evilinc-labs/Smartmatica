@@ -1,4 +1,4 @@
-package dev.smartmatica.util;
+package dev.moar.util;
 
 import net.minecraft.client.MinecraftClient;
 import net.minecraft.text.MutableText;

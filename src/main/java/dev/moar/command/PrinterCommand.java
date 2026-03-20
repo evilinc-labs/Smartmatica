@@ -1,14 +1,14 @@
-package dev.smartmatica.command;
+package dev.moar.command;
 
 import com.mojang.brigadier.arguments.IntegerArgumentType;
 import com.mojang.brigadier.arguments.StringArgumentType;
-import dev.smartmatica.SmartmaticaMod;
-import dev.smartmatica.printer.SchematicPrinter;
-import dev.smartmatica.schematic.LitematicaDetector;
-import dev.smartmatica.schematic.PrinterCheckpoint;
-import dev.smartmatica.schematic.PrinterResourceManager;
-import dev.smartmatica.util.PrinterDatabase;
-import dev.smartmatica.util.ChatHelper;
+import dev.moar.MoarMod;
+import dev.moar.chest.ChestManager;
+import dev.moar.printer.SchematicPrinter;
+import dev.moar.schematic.LitematicaDetector;
+import dev.moar.schematic.PrinterCheckpoint;
+import dev.moar.schematic.PrinterResourceManager;
+import dev.moar.util.ChatHelper;
 import net.fabricmc.fabric.api.client.command.v2.ClientCommandManager;
 import net.fabricmc.fabric.api.client.command.v2.ClientCommandRegistrationCallback;
 import net.fabricmc.fabric.api.client.command.v2.FabricClientCommandSource;
@@ -43,8 +43,7 @@ import java.util.Map;
  * /printer materials             – show bill of materials breakdown
  * /printer toggle                – toggle the printer on/off
  * /printer autobuild             – toggle AutoBuild mode
- * /printer air                    – toggle air placement
- * /printer sort [mode]           – set build order (bottom_up/top_down/nearest)
+ * /printer air                    – toggle air placement * /printer speed [1-20]           -- set placement speed (blocks per second) * /printer sort [mode]           – set build order (bottom_up/top_down/nearest)
  * /printer supply add            – mark block at feet as supply chest
  * /printer supply add &lt;x&gt; &lt;y&gt; &lt;z&gt; – mark specific pos as supply chest
  * /printer supply remove         – unmark supply chest at feet
@@ -375,7 +374,23 @@ public final class PrinterCommand {
                         return 1;
                     })
             );
-
+            // /printer speed [1-20] -- set placement speed (blocks per second)
+            root.then(ClientCommandManager.literal("speed")
+                    .executes(ctx -> {
+                        SchematicPrinter printer = getPrinter();
+                        ChatHelper.info("Current speed: §e" + printer.getBps() + " §7blocks/sec (range: 1-20)");
+                        return 1;
+                    })
+                    .then(ClientCommandManager.argument("bps", IntegerArgumentType.integer(1, 20))
+                            .executes(ctx -> {
+                                SchematicPrinter printer = getPrinter();
+                                int value = IntegerArgumentType.getInteger(ctx, "bps");
+                                printer.setBps(value);
+                                ChatHelper.info("Placement speed: §e" + value + " §7blocks/sec");
+                                return 1;
+                            })
+                    )
+            );
             // /printer sort [mode] — set build order (bottom_up, top_down, nearest)
             root.then(ClientCommandManager.literal("sort")
                     .executes(ctx -> {
@@ -514,7 +529,7 @@ public final class PrinterCommand {
                             return 0;
                         }
 
-                        PrinterDatabase.ChestIndexSummary summary = PrinterDatabase.getChestIndexSummary();
+                        ChestManager.ChestIndexSummary summary = MoarMod.getChestManager().getIndexSummary();
                         ChatHelper.info("§l§6Supply Index Summary");
                         ChatHelper.info("Chests: §e" + summary.totalChests()
                                 + " §7(§a" + summary.indexedChests() + " indexed§7, §c"
@@ -526,7 +541,7 @@ public final class PrinterCommand {
                             ChatHelper.info("Total items available: §a" + summary.totalItems());
 
                             // Show top 10 items in supply
-                            Map<String, Integer> combined = PrinterDatabase.getCombinedChestInventory();
+                            Map<String, Integer> combined = MoarMod.getChestManager().getCombinedInventory();
                             List<Map.Entry<String, Integer>> top = combined.entrySet().stream()
                                     .sorted(Map.Entry.<String, Integer>comparingByValue().reversed())
                                     .limit(10)
@@ -675,7 +690,7 @@ public final class PrinterCommand {
     }
 
     private static SchematicPrinter getPrinter() {
-        return SmartmaticaMod.getPrinter();
+        return MoarMod.getPrinter();
     }
 
     /**

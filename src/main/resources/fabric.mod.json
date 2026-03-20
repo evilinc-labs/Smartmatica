@@ -7,15 +7,15 @@
 	"license": "AGPL-3.0-only",
 	"authors": [],
 	"contact": {},
-	"icon": "assets/smartmatica/icon.png",
+	"icon": "assets/moar/icon.png",
 	"environment": "client",
 	"entrypoints": {
 		"client": [
-			"dev.smartmatica.SmartmaticaMod"
+			"dev.moar.MoarMod"
 		]
 	},
 	"mixins": [
-		"smartmatica.mixins.json"
+		"moar.mixins.json"
 	],
 	"depends": {
 		"fabricloader": ">=0.18.4",

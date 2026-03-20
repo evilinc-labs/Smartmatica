@@ -1,4 +1,4 @@
-package dev.smartmatica.schematic;
+package dev.moar.schematic;
 
 import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
@@ -20,29 +20,19 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
 
-/**
- * Detects schematics that Litematica currently has loaded/placed in the world.
- *
- * Litematica persists its active placements in JSON files under
- * {@code config/litematica/}.  The per-dimension files follow the pattern
- * {@code litematica_<profile>_dim_<dimension>.json} and contain an array
- * of placement entries with the schematic file path, world-space origin,
- * and enabled flag.
- *
- * This class scans those files to find enabled placements, allowing the
- * printer to auto-detect what the user has loaded in Litematica
- * without requiring a separate load step.
- */
+// Detects schematics that Litematica has loaded/placed in the world.
+// Scans Litematica's JSON config files (config/litematica/) for enabled
+// placements with schematic paths, world-space origins, and dimensions.
 public final class LitematicaDetector {
 
-    private static final Logger LOGGER = LoggerFactory.getLogger("Smartmatica/Detector");
+    private static final Logger LOGGER = LoggerFactory.getLogger("MOAR/Detector");
 
     private LitematicaDetector() {}
 
     /**
      * A detected Litematica schematic placement.
      *
-     * @param schematicPath absolute path to the {@code .litematic} file
+     * @param schematicPath absolute path to the .litematic file
      * @param name          human-readable placement name
      * @param originX       world-space X of the placement origin
      * @param originY       world-space Y of the placement origin
@@ -56,7 +46,7 @@ public final class LitematicaDetector {
 
     /**
      * Scan all Litematica per-dimension config files and return every
-     * enabled schematic placement whose {@code .litematic} file
+     * enabled schematic placement whose .litematic file
      * still exists on disk.
      *
      * Tries Litematica's in-memory state first (via reflection), then
@@ -93,7 +83,7 @@ public final class LitematicaDetector {
     }
 
     /**
-     * Convenience: return the first detected enabled placement, or {@code null}.
+     * Convenience: return the first detected enabled placement, or null.
      */
     public static DetectedPlacement detectFirst() {
         List<DetectedPlacement> all = detectPlacements();
@@ -102,17 +92,15 @@ public final class LitematicaDetector {
 
     // ── internals ───────────────────────────────────────────────────────
 
-    /**
-     * Read Litematica's in-memory placements via reflection.
-     * This works immediately when the user loads/moves a schematic in
-     * Litematica, without waiting for a config save.
-     *
-     * Reflection chain:
-     * {@code DataManager.getSchematicPlacementManager()
-     *     .getAllSchematicsPlacements() → List<SchematicPlacement>}
-     * Each {@code SchematicPlacement} has {@code getOrigin()},
-     * {@code getSchematicFile()}, {@code isEnabled()}, {@code getName()}.
-     */
+    // Read Litematica's in-memory placements via reflection.
+    // Works immediately when the user loads/moves a schematic,
+    // without waiting for a config save.
+    //
+    // Reflection chain:
+    //   DataManager.getSchematicPlacementManager()
+    //     .getAllSchematicsPlacements() -> List<SchematicPlacement>
+    //   Each SchematicPlacement has getOrigin(),
+    //   getSchematicFile(), isEnabled(), getName().
     private static List<DetectedPlacement> detectFromMemory() {
         List<DetectedPlacement> results = new ArrayList<>();
         try {
@@ -234,7 +222,7 @@ public final class LitematicaDetector {
 
     /**
      * Detect the correct anchor by reading blocks directly from
-     * Litematica's in-memory {@code SchematicWorld}.  This is the
+     * Litematica's in-memory SchematicWorld.  This is the
      * "hologram world" — all blocks that the user sees rendered as
      * transparent overlays exist at their exact world positions in this
      * synthetic world.
@@ -245,7 +233,7 @@ public final class LitematicaDetector {
      * Litematica's placement origin logic at all.
      *
      * @param schematic the loaded schematic to correlate against
-     * @return the computed anchor, or {@code null} if detection failed
+     * @return the computed anchor, or null if detection failed
      */
     public static BlockPos detectAnchorFromSchematicWorld(LitematicaSchematic schematic) {
         if (schematic == null) return null;

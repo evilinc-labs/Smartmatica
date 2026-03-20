@@ -1,4 +1,4 @@
-package dev.smartmatica.util;
+package dev.moar.util;
 
 import net.minecraft.SharedConstants;
 import net.minecraft.nbt.NbtCompound;

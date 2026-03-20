@@ -1,6 +1,6 @@
-package dev.smartmatica.schematic;
+package dev.moar.schematic;
 
-import dev.smartmatica.util.NbtCompat;
+import dev.moar.util.NbtCompat;
 import net.minecraft.block.Block;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.Blocks;
@@ -39,7 +39,7 @@ import java.util.Set;
  */
 public final class LitematicaSchematic {
 
-    private static final Logger LOGGER = LoggerFactory.getLogger("Smartmatica/Schematic");
+    private static final Logger LOGGER = LoggerFactory.getLogger("MOAR/Schematic");
 
     private final String name;
     private final String author;

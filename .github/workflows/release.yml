@@ -60,27 +60,27 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          name: Smartmatica v${{ steps.version.outputs.version }}
+          name: MOAR v${{ steps.version.outputs.version }}
           body: |
-            ## Smartmatica v${{ steps.version.outputs.version }}
+            ## MOAR v${{ steps.version.outputs.version }}
 
             ### Downloads
             | Minecraft | File |
             |-----------|------|
-            | 1.21.1  | `smartmatica-${{ steps.version.outputs.version }}+1.21.1.jar` |
-            | 1.21.4  | `smartmatica-${{ steps.version.outputs.version }}+1.21.4.jar` |
-            | 1.21.5  | `smartmatica-${{ steps.version.outputs.version }}+1.21.5.jar` |
-            | 1.21.8  | `smartmatica-${{ steps.version.outputs.version }}+1.21.8.jar` |
-            | 1.21.10 | `smartmatica-${{ steps.version.outputs.version }}+1.21.10.jar` |
+            | 1.21.1  | `moar-${{ steps.version.outputs.version }}+1.21.1.jar` |
+            | 1.21.4  | `moar-${{ steps.version.outputs.version }}+1.21.4.jar` |
+            | 1.21.5  | `moar-${{ steps.version.outputs.version }}+1.21.5.jar` |
+            | 1.21.8  | `moar-${{ steps.version.outputs.version }}+1.21.8.jar` |
+            | 1.21.10 | `moar-${{ steps.version.outputs.version }}+1.21.10.jar` |
 
             ### Changes
             ${{ steps.changelog.outputs.changes }}
           files: |
-            build/libs/*/smartmatica-*+1.21.1.jar
-            build/libs/*/smartmatica-*+1.21.4.jar
-            build/libs/*/smartmatica-*+1.21.5.jar
-            build/libs/*/smartmatica-*+1.21.8.jar
-            build/libs/*/smartmatica-*+1.21.10.jar
-            build/libs/*/smartmatica-*-sources.jar
+            build/libs/*/moar-*+1.21.1.jar
+            build/libs/*/moar-*+1.21.4.jar
+            build/libs/*/moar-*+1.21.5.jar
+            build/libs/*/moar-*+1.21.8.jar
+            build/libs/*/moar-*+1.21.10.jar
+            build/libs/*/moar-*-sources.jar
           fail_on_unmatched_files: true
           generate_release_notes: false

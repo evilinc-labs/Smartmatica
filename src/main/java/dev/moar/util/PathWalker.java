@@ -1,4 +1,4 @@
-package dev.smartmatica.util;
+package dev.moar.util;
 
 import net.minecraft.block.Block;
 import net.minecraft.block.BlockState;
@@ -34,7 +34,7 @@ import java.util.List;
  */
 public final class PathWalker {
 
-    private static final Logger LOGGER = LoggerFactory.getLogger("Smartmatica/PathWalker");
+    private static final Logger LOGGER = LoggerFactory.getLogger("MOAR/PathWalker");
 
     private PathWalker() {}
 

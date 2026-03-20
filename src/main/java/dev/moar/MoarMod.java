@@ -1,13 +1,13 @@
-package dev.smartmatica;
+package dev.moar;
 
-import dev.smartmatica.chest.ChestManager;
-import dev.smartmatica.command.PrinterCommand;
-import dev.smartmatica.command.SpawnProofCommand;
-import dev.smartmatica.command.StashCommand;
-import dev.smartmatica.stash.StashManager;
-import dev.smartmatica.printer.SchematicPrinter;
-import dev.smartmatica.schematic.PrinterResourceManager;
-import dev.smartmatica.spawnproof.SpawnProofer;
+import dev.moar.chest.ChestManager;
+import dev.moar.command.PrinterCommand;
+import dev.moar.command.SpawnProofCommand;
+import dev.moar.command.StashCommand;
+import dev.moar.stash.StashManager;
+import dev.moar.printer.SchematicPrinter;
+import dev.moar.schematic.PrinterResourceManager;
+import dev.moar.spawnproof.SpawnProofer;
 import net.fabricmc.api.ClientModInitializer;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
 import net.fabricmc.fabric.api.client.keybinding.v1.KeyBindingHelper;
@@ -21,13 +21,13 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
- * Smartmatica — a standalone Fabric mod that automatically places
+ * MOAR — a standalone Fabric mod that automatically places
  * blocks from loaded {@code .litematic} schematics.
  */
-public class SmartmaticaMod implements ClientModInitializer {
+public class MoarMod implements ClientModInitializer {
 
-    public static final String MOD_ID = "smartmatica";
-    public static final Logger LOGGER = LoggerFactory.getLogger("Smartmatica");
+    public static final String MOD_ID = "moar";
+    public static final Logger LOGGER = LoggerFactory.getLogger("MOAR");
 
     private static final SchematicPrinter PRINTER = new SchematicPrinter();
     private static final SpawnProofer SPAWN_PROOFER = new SpawnProofer();
@@ -38,17 +38,17 @@ public class SmartmaticaMod implements ClientModInitializer {
 
     @Override
     public void onInitializeClient() {
-        LOGGER.info("Smartmatica initializing...");
+        LOGGER.info("MOAR initializing...");
 
         // Register keybinding to toggle the printer
         toggleKey = KeyBindingHelper.registerKeyBinding(new KeyBinding(
-                "key.smartmatica.toggle",
+                "key.moar.toggle",
                 InputUtil.Type.KEYSYM,
                 GLFW.GLFW_KEY_KP_0,
                 /*? if >=1.21.10 {*//*
-                KeyBinding.Category.create(Identifier.of("smartmatica", "category"))
+                KeyBinding.Category.create(Identifier.of("moar", "category"))
                 *//*?} else {*/
-                "category.smartmatica"
+                "category.moar"
                 /*?}*/
         ));
 
@@ -80,7 +80,7 @@ public class SmartmaticaMod implements ClientModInitializer {
             STASH_MANAGER.tick();
         });
 
-        LOGGER.info("Smartmatica initialized.");
+        LOGGER.info("MOAR initialized.");
     }
 
     /** Get the singleton printer instance. */

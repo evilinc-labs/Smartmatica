@@ -19,4 +19,4 @@ stonecutter {
     }
 }
 
-rootProject.name = "smartmatica"
+rootProject.name = "moar"

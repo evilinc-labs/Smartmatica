@@ -1,6 +1,6 @@
-package dev.smartmatica.mixin;
+package dev.moar.mixin;
 
-import dev.smartmatica.util.SneakOverride;
+import dev.moar.util.SneakOverride;
 import net.minecraft.client.input.Input;
 import net.minecraft.client.input.KeyboardInput;
 /*? if >=1.21.4 {*//*
@@ -26,7 +26,7 @@ public abstract class KeyboardInputMixin extends Input {
 
     /*? if >=1.21.4 {*//*
     @Inject(method = "tick()V", at = @At("TAIL"))
-    private void smartmatica$overrideSneak(CallbackInfo ci) {
+    private void moar$overrideSneak(CallbackInfo ci) {
         if (SneakOverride.shouldSneak()) {
             PlayerInput old = this.playerInput;
             this.playerInput = new PlayerInput(
@@ -36,7 +36,7 @@ public abstract class KeyboardInputMixin extends Input {
     }
     *//*?} else {*/
     @Inject(method = "tick(ZF)V", at = @At("TAIL"))
-    private void smartmatica$overrideSneak(boolean slowDown, float movementMultiplier, CallbackInfo ci) {
+    private void moar$overrideSneak(boolean slowDown, float movementMultiplier, CallbackInfo ci) {
         if (SneakOverride.shouldSneak()) {
             this.sneaking = true;
         }

@@ -1,6 +1,7 @@
-package dev.smartmatica.schematic;
+package dev.moar.schematic;
 
-import dev.smartmatica.util.PrinterDatabase;
+import dev.moar.MoarMod;
+import dev.moar.util.PrinterDatabase;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.Blocks;
 import net.minecraft.block.FluidBlock;
@@ -16,9 +17,9 @@ import java.util.*;
 /**
  * Manages supply-chest interactions and materials analysis for AutoBuild.
  *
- * Supply-chest positions and inventory snapshots are stored in
- * {@link PrinterDatabase}.  This class provides higher-level operations
- * like materials analysis that layer on top of the database.
+ * Supply-chest positions and inventory snapshots are managed by
+ * {@link dev.moar.chest.ChestManager}.  This class provides
+ * higher-level operations like materials analysis that layer on top.
  */
 public final class PrinterResourceManager {
 
@@ -27,23 +28,23 @@ public final class PrinterResourceManager {
     // ── delegated supply-chest API (kept for backward compat) ───────────
 
     public static boolean addSupplyChest(BlockPos pos) {
-        return PrinterDatabase.addChest(pos);
+        return MoarMod.getChestManager().addSupplyChest(pos);
     }
 
     public static boolean removeSupplyChest(BlockPos pos) {
-        return PrinterDatabase.removeChest(pos);
+        return MoarMod.getChestManager().removeSupplyChest(pos);
     }
 
     public static void clearSupplyChests() {
-        PrinterDatabase.clearChests();
+        MoarMod.getChestManager().clearSupplyChests();
     }
 
     public static List<BlockPos> getSupplyChests() {
-        return PrinterDatabase.getChestPositions();
+        return MoarMod.getChestManager().getSupplyPositions();
     }
 
     public static int supplyChestCount() {
-        return PrinterDatabase.chestCount();
+        return MoarMod.getChestManager().supplyChestCount();
     }
 
     /** How few items trigger a restock run. */
@@ -51,18 +52,18 @@ public final class PrinterResourceManager {
 
     public static BlockPos findBestSupplyChest(
             BlockPos from, Set<String> neededItemIds, World world) {
-        return PrinterDatabase.findBestChest(from, neededItemIds);
+        return MoarMod.getChestManager().findBestChest(from, neededItemIds);
     }
 
     /** Load persisted data from disk (supply chest positions + scaffold). */
     public static void load() {
-        PrinterDatabase.loadChests();
+        MoarMod.getChestManager().loadSupplyChests();
         PrinterDatabase.loadScaffold();
     }
 
     /** Save supply-chest positions to disk. */
     public static void save() {
-        PrinterDatabase.saveChests();
+        MoarMod.getChestManager().saveSupplyChests();
     }
 
     // ── materials analysis ──────────────────────────────────────────────
@@ -169,7 +170,7 @@ public final class PrinterResourceManager {
         }
 
         // 3. Compute supply inventory from indexed chests
-        Map<String, Integer> inSupply = PrinterDatabase.getCombinedChestInventory();
+        Map<String, Integer> inSupply = MoarMod.getChestManager().getCombinedInventory();
 
         // 4. Compute missing = required - placed
         Map<String, Integer> missing = new HashMap<>();

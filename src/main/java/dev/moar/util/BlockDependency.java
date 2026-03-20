@@ -1,4 +1,4 @@
-package dev.smartmatica.util;
+package dev.moar.util;
 
 import net.minecraft.block.*;
 import net.minecraft.block.enums.BlockFace;

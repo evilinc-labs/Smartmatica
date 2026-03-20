@@ -1,17 +1,17 @@
-package dev.smartmatica.printer;
+package dev.moar.printer;
 
-import dev.smartmatica.chest.ChestManager;
-import dev.smartmatica.schematic.LitematicaDetector;
-import dev.smartmatica.schematic.LitematicaSchematic;
-import dev.smartmatica.schematic.PrinterCheckpoint;
-import dev.smartmatica.schematic.PrinterResourceManager;
-import dev.smartmatica.util.BlockDependency;
-import dev.smartmatica.util.ChatHelper;
-import dev.smartmatica.util.PathWalker;
-import dev.smartmatica.util.PlacementEngine;
-import dev.smartmatica.util.PrinterDatabase;
-import dev.smartmatica.SmartmaticaMod;
-import dev.smartmatica.util.SneakOverride;
+import dev.moar.chest.ChestManager;
+import dev.moar.schematic.LitematicaDetector;
+import dev.moar.schematic.LitematicaSchematic;
+import dev.moar.schematic.PrinterCheckpoint;
+import dev.moar.schematic.PrinterResourceManager;
+import dev.moar.util.BlockDependency;
+import dev.moar.util.ChatHelper;
+import dev.moar.util.PathWalker;
+import dev.moar.util.PlacementEngine;
+import dev.moar.util.PrinterDatabase;
+import dev.moar.MoarMod;
+import dev.moar.util.SneakOverride;
 import net.minecraft.block.*;
 import net.minecraft.block.enums.BedPart;
 import net.minecraft.block.enums.DoubleBlockHalf;
@@ -64,7 +64,7 @@ import java.util.*;
  *       takes needed items, walks back, and resumes building.
  *
  * Load/unload and position commands are handled by
- * {@link dev.smartmatica.command.PrinterCommand PrinterCommand}.
+ * {@link dev.moar.command.PrinterCommand PrinterCommand}.
  */
 public class SchematicPrinter {
 
@@ -76,7 +76,7 @@ public class SchematicPrinter {
         TOP_DOWN
     }
 
-    private static final Logger LOGGER = LoggerFactory.getLogger("Smartmatica");
+    private static final Logger LOGGER = LoggerFactory.getLogger("MOAR");
 
     public enum AutoState {
         BUILDING,
@@ -451,7 +451,7 @@ public class SchematicPrinter {
             this.autoDetected = true;
             this.buildDimension = mc.world != null ? mc.world.getRegistryKey() : null;
             PrinterDatabase.clearScaffold();
-            SmartmaticaMod.getChestManager().clearSessionData();
+            MoarMod.getChestManager().clearSessionData();
             warnIfAnchorSuspicious();
             return true;
         } catch (IOException e) {
@@ -590,7 +590,7 @@ public class SchematicPrinter {
         MinecraftClient mc = MinecraftClient.getInstance();
         this.buildDimension = mc.world != null ? mc.world.getRegistryKey() : null;
         PrinterDatabase.clearScaffold();
-        SmartmaticaMod.getChestManager().clearSessionData();
+        MoarMod.getChestManager().clearSessionData();
     }
 
     public void unload() {
@@ -602,7 +602,7 @@ public class SchematicPrinter {
         this.buildDimension = null;
         PrinterCheckpoint.clear();
         PrinterDatabase.clearScaffold();
-        SmartmaticaMod.getChestManager().clearSessionData();
+        MoarMod.getChestManager().clearSessionData();
         PathWalker.stop();
         autoState = AutoState.IDLE;
         if (enabled) disable();
@@ -1065,7 +1065,7 @@ public class SchematicPrinter {
 
                 // Build appears complete — check for scaffold to clean up.
                 liquidPass = false; // reset for next build
-                SmartmaticaMod.getChestManager().clearSnapshots();
+                MoarMod.getChestManager().clearSnapshots();
                 if (PrinterDatabase.hasScaffold()) {
                     autoState = AutoState.CLEANING_SCAFFOLD;
                     if (statusMessages) {
@@ -1100,7 +1100,7 @@ public class SchematicPrinter {
     private void handleMissingItems(MinecraftClient mc) {
         // If supply chests exist and we haven't exhausted restock attempts,
         // go restock.
-        if (SmartmaticaMod.getChestManager().supplyChestCount() > 0 && restockFailures < MAX_RESTOCK_FAILURES) {
+        if (MoarMod.getChestManager().supplyChestCount() > 0 && restockFailures < MAX_RESTOCK_FAILURES) {
             if (statusMessages && missingItemMsgCooldown <= 0) {
                 ChatHelper.info("§eMissing items — going to restock. Need: "
                         + formatMissingItems(lastMissingItems));
@@ -1866,7 +1866,7 @@ public class SchematicPrinter {
 
             // Index chest contents before taking items (snapshot for future queries)
             if (supplyTarget != null) {
-                SmartmaticaMod.getChestManager().scanOpenChest(supplyTarget, containerHandler);
+                MoarMod.getChestManager().scanOpenChest(supplyTarget, containerHandler);
             }
 
             takeNeededItems(mc, mc.player, containerHandler);
@@ -1874,7 +1874,7 @@ public class SchematicPrinter {
 
             // Invalidate the snapshot since we just modified the chest
             if (supplyTarget != null) {
-                SmartmaticaMod.getChestManager().invalidateSnapshot(supplyTarget);
+                MoarMod.getChestManager().invalidateSnapshot(supplyTarget);
             }
 
             // Verify that items were actually obtained
@@ -2673,7 +2673,7 @@ public class SchematicPrinter {
         // player has obtained them (manually or via a newly added chest).
         if (!lastMissingItems.isEmpty()) {
             // Supply chest was added since we went idle — go restock
-            if (SmartmaticaMod.getChestManager().supplyChestCount() > 0) {
+            if (MoarMod.getChestManager().supplyChestCount() > 0) {
                 if (statusMessages) {
                     ChatHelper.info("§aSupply chest available — resuming build.");
                 }
@@ -2845,7 +2845,7 @@ public class SchematicPrinter {
     // INVENTORY & RESTOCK
 
     private boolean shouldRestock(ClientPlayerEntity player, World world) {
-        if (SmartmaticaMod.getChestManager().supplyChestCount() == 0) return false;
+        if (MoarMod.getChestManager().supplyChestCount() == 0) return false;
 
         Map<Item, Integer> needed = getNeededItemsNearby(player, world, 200);
         Map<Item, Integer> inventory = PlacementEngine.getInventoryContentsCached();
@@ -2905,7 +2905,7 @@ public class SchematicPrinter {
         }
 
         MinecraftClient mc = MinecraftClient.getInstance();
-        BlockPos nearest = SmartmaticaMod.getChestManager().findBestChest(
+        BlockPos nearest = MoarMod.getChestManager().findBestChest(
                 player.getBlockPos(), neededItems, unreachableChests);
         if (nearest == null) {
             if (statusMessages) {
@@ -2994,7 +2994,7 @@ public class SchematicPrinter {
         List<BlockPos> candidates = new ArrayList<>();
 
         // Other registered chests (not the target itself)
-        for (BlockPos chest : SmartmaticaMod.getChestManager().getSupplyPositions()) {
+        for (BlockPos chest : MoarMod.getChestManager().getSupplyPositions()) {
             if (!chest.equals(to) && !chest.equals(from)) {
                 candidates.add(chest);
             }
