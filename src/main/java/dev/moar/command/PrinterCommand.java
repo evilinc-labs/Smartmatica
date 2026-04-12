@@ -138,14 +138,12 @@ public final class PrinterCommand {
                             return 0;
                         }
 
-                        // Primary: correlate against Litematica's SchematicWorld
-                        // to get the exact hologram position.
+                        // Correlate against Litematica SchematicWorld for exact anchor
                         BlockPos pos = LitematicaDetector.detectAnchorFromSchematicWorld(
                                 printer.getSchematic());
                         if (pos != null) {
                             ChatHelper.info("§aAligned anchor from hologram blocks.");
                         } else {
-                            // Fallback: snap to nearest Litematica placement origin
                             List<LitematicaDetector.DetectedPlacement> placements =
                                     SchematicPrinter.detectAllPlacements();
                             LitematicaDetector.DetectedPlacement bestMatch = null;
@@ -534,7 +532,7 @@ public final class PrinterCommand {
                     )
             );
 
-            // ── /printer supply ─────────────────────────────────────────
+            // /printer supply
 
             /*? if >=26.1 {*//*
             var supply = ClientCommands.literal("supply");
@@ -718,11 +716,151 @@ public final class PrinterCommand {
 
             root.then(supply);
 
+            // /printer dump sub-tree
+
+            /*? if >=26.1 {*//*
+            var dump = ClientCommands.literal("dump");
+            *//*?} else {*/
+            var dump = ClientCommandManager.literal("dump");
+            /*?}*/
+
+            // /printer dump  (help)
+            dump.executes(ctx -> {
+                ChatHelper.info("§7Dump chests store mined items during area clearing.");
+                ChatHelper.info("  §f/printer dump add §7[x y z] §8— mark a dump chest");
+                ChatHelper.info("  §f/printer dump remove §8— unmark nearest dump chest");
+                ChatHelper.info("  §f/printer dump list §8— show all dump chests");
+                ChatHelper.info("  §f/printer dump clear §8— clear all dump chests");
+                return 1;
+            });
+
+            // /printer dump add [x y z]
+            /*? if >=26.1 {*//*
+            dump.then(ClientCommands.literal("add")
+            *//*?} else {*/
+            dump.then(ClientCommandManager.literal("add")
+            /*?}*/
+                    .executes(ctx -> {
+                        /*? if >=26.1 {*//*
+                        Minecraft mc = Minecraft.getInstance();
+                        *//*?} else {*/
+                        MinecraftClient mc = MinecraftClient.getInstance();
+                        /*?}*/
+                        if (mc.player == null) return 0;
+                        BlockPos pos = findTargetContainer(mc);
+                        if (pos == null) {
+                            ChatHelper.info("§cNo chest, barrel, or shulker box found. Look at one or stand next to it.");
+                            return 0;
+                        }
+                        if (MoarMod.getChestManager().addDumpChest(pos)) {
+                            ChatHelper.info("§aMarked dump chest at §e"
+                                    + pos.getX() + " " + pos.getY() + " " + pos.getZ());
+                        } else {
+                            ChatHelper.info("§eThat position is already marked.");
+                        }
+                        return 1;
+                    })
+                    /*? if >=26.1 {*//*
+                    .then(ClientCommands.argument("x", IntegerArgumentType.integer())
+                    *//*?} else {*/
+                    .then(ClientCommandManager.argument("x", IntegerArgumentType.integer())
+                    /*?}*/
+                            /*? if >=26.1 {*//*
+                            .then(ClientCommands.argument("y", IntegerArgumentType.integer())
+                            *//*?} else {*/
+                            .then(ClientCommandManager.argument("y", IntegerArgumentType.integer())
+                            /*?}*/
+                                    /*? if >=26.1 {*//*
+                                    .then(ClientCommands.argument("z", IntegerArgumentType.integer())
+                                    *//*?} else {*/
+                                    .then(ClientCommandManager.argument("z", IntegerArgumentType.integer())
+                                    /*?}*/
+                                            .executes(ctx -> {
+                                                int x = IntegerArgumentType.getInteger(ctx, "x");
+                                                int y = IntegerArgumentType.getInteger(ctx, "y");
+                                                int z = IntegerArgumentType.getInteger(ctx, "z");
+                                                BlockPos pos = new BlockPos(x, y, z);
+                                                if (MoarMod.getChestManager().addDumpChest(pos)) {
+                                                    ChatHelper.info("§aMarked dump chest at §e" + x + " " + y + " " + z);
+                                                } else {
+                                                    ChatHelper.info("§eThat position is already marked.");
+                                                }
+                                                return 1;
+                                            })
+                                    )
+                            )
+                    )
+            );
+
+            // /printer dump remove
+            /*? if >=26.1 {*//*
+            dump.then(ClientCommands.literal("remove")
+            *//*?} else {*/
+            dump.then(ClientCommandManager.literal("remove")
+            /*?}*/
+                    .executes(ctx -> {
+                        /*? if >=26.1 {*//*
+                        Minecraft mc = Minecraft.getInstance();
+                        *//*?} else {*/
+                        MinecraftClient mc = MinecraftClient.getInstance();
+                        /*?}*/
+                        if (mc.player == null) return 0;
+                        BlockPos pos = findTargetContainer(mc);
+                        if (pos == null) {
+                            ChatHelper.info("§cNo dump chest found nearby to remove.");
+                            return 0;
+                        }
+                        if (MoarMod.getChestManager().removeDumpChest(pos)) {
+                            ChatHelper.info("§aRemoved dump chest at §e"
+                                    + pos.getX() + " " + pos.getY() + " " + pos.getZ());
+                        } else {
+                            ChatHelper.info("§cThat container is not marked as a dump chest.");
+                        }
+                        return 1;
+                    })
+            );
+
+            // /printer dump list
+            /*? if >=26.1 {*//*
+            dump.then(ClientCommands.literal("list")
+            *//*?} else {*/
+            dump.then(ClientCommandManager.literal("list")
+            /*?}*/
+                    .executes(ctx -> {
+                        List<BlockPos> chests = MoarMod.getChestManager().getDumpPositions();
+                        if (chests.isEmpty()) {
+                            ChatHelper.info("No dump chests designated.");
+                            ChatHelper.info("§7Use §f/printer dump add §7while standing at a chest.");
+                        } else {
+                            ChatHelper.info("§lDump chests (" + chests.size() + "):");
+                            for (BlockPos pos : chests) {
+                                ChatHelper.info(" §7- §e" + pos.getX() + " " + pos.getY() + " " + pos.getZ());
+                            }
+                        }
+                        return 1;
+                    })
+            );
+
+            // /printer dump clear
+            /*? if >=26.1 {*//*
+            dump.then(ClientCommands.literal("clear")
+            *//*?} else {*/
+            dump.then(ClientCommandManager.literal("clear")
+            /*?}*/
+                    .executes(ctx -> {
+                        MoarMod.getChestManager().clearDumpChests();
+                        ChatHelper.info("§aAll dump chest designations cleared.");
+                        return 1;
+                    })
+            );
+
+            root.then(dump);
+
             dispatcher.register(root);
         });
     }
 
-    // ── helpers ──────────────────────────────────────────────────────────
+    // helpers
 
     private static int loadSchematic(String filename) {
         SchematicPrinter printer = getPrinter();

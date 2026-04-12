@@ -188,6 +188,10 @@ public class SchematicPrinter {
     private static final Logger LOGGER = LoggerFactory.getLogger("MOAR");
 
     public enum AutoState {
+        CLEARING_AREA,
+        WALKING_TO_CLEAR,
+        WALKING_TO_DUMP,
+        DUMPING,
         BUILDING,
         WALKING_TO_BUILD,
         WALKING_TO_SUPPLY,
@@ -218,8 +222,7 @@ public class SchematicPrinter {
     private BlockPos anchor;
     private int blocksPlaced;
     private String schematicFile;
-    /** Dimension the schematic was loaded in — auto-build pauses if the
-     *  player switches dimensions (e.g. enters a portal). */
+    /** Dimension the schematic was loaded in — pauses on dimension change. */
     /*? if >=26.1 {*//*
     private ResourceKey<Level> buildDimension;
     *//*?} else {*/
@@ -233,21 +236,28 @@ public class SchematicPrinter {
     private BlockPos supplyTarget;
     private Set<String> neededItems;
     private int restockWaitTicks;
-    /** Ticks since the chest screen handler first appeared in RESTOCKING
-     *  state.  Used to delay item grabbing until server syncs contents. */
+    /** Ticks waiting for server to sync chest contents in RESTOCKING. */
     private int chestSyncDelay;
     /** Consecutive restock failures without grabbing any items. */
     private int restockFailures;
-    /** Chests Baritone couldn't reach — excluded until cleared. */
-    private final Set<BlockPos> unreachableChests = new HashSet<>();
+    /** Chests Baritone couldn't reach — LRU-evicted at 64. */
+    private final Set<BlockPos> unreachableChests = Collections.newSetFromMap(
+            new LinkedHashMap<>(32, 0.75f, false) {
+                @Override protected boolean removeEldestEntry(Map.Entry<BlockPos, Boolean> eldest) {
+                    return size() > 64;
+                }
+            });
     private int idleScanCooldown;
     private int noProgressTicks;
     private Set<Item> lastMissingItems = new HashSet<>();
     private int missingItemMsgCooldown;
-    /** Items the printer has given up restocking — blocks requiring these
-     *  are skipped so the build continues with available materials.
-     *  Cleared on successful restock or when AutoBuild is re-enabled. */
-    private final Set<Item> skippedItems = new HashSet<>();
+    /** Items we've given up restocking — LRU-evicted at 64. */
+    private final Set<Item> skippedItems = Collections.newSetFromMap(
+            new LinkedHashMap<>(16, 0.75f, false) {
+                @Override protected boolean removeEldestEntry(Map.Entry<Item, Boolean> eldest) {
+                    return size() > 64;
+                }
+            });
     private final Set<BlockPos> failedZones = Collections.newSetFromMap(
             new LinkedHashMap<>(32, 0.75f, false) {
                 @Override protected boolean removeEldestEntry(Map.Entry<BlockPos, Boolean> eldest) {
@@ -264,27 +274,18 @@ public class SchematicPrinter {
     private int walkAttemptCooldown;
     private int stuckCycles;
     private static final int MAX_STUCK_CYCLES = 10;
-    /** Tick counter for periodic re-evaluation of skipped items.
-     *  Every N ticks, check if the player has acquired any of the
-     *  items previously added to `skippedItems`. If so, un-skip them
-     *  so the builder can retry those blocks. */
+    /** Ticks until next skippedItems re-evaluation. */
     private int skippedItemRecheckCooldown;
     private static final int SKIPPED_RECHECK_INTERVAL = 200; // ~10s
-    /** Consecutive server-rejected placements.  When the anti-cheat
-     *  rolls back too many placements in a row, the mod should stop
-     *  trying and reposition instead of spinning endlessly. */
+    /** Max consecutive server-rejected placements before repositioning. */
     private static final int SERVER_REJECT_THRESHOLD = 6;
-    /** True when all solid blocks are done and we're placing deferred liquids.
-     *  Liquids are placed last because Baritone pathfinding breaks in water/lava. */
+    /** True when placing deferred liquids (after all solids done). */
     private boolean liquidPass;
-    /** True when the current supply walk is a waypoint-based retry attempt.
-     *  Prevents infinite retry loops — only one waypoint retry per chest. */
+    /** True if waypoint-based supply retry was already attempted. */
     private boolean triedWaypointRestock;
-    /** True when we already tried straight-line intermediate waypoints
-     *  for the current supply target.  Third retry strategy. */
+    /** True if linear-waypoint supply retry was already attempted. */
     private boolean triedLinearRestock;
-    /** True when we already tried walking with Baritone's block placement
-     *  enabled (bridging/pillaring).  Final retry strategy. */
+    /** True if placement-walk supply retry was already attempted. */
     private boolean triedPlacementRestock;
 
     /** Multi-phase descent: 0=none, 1=horizontal, 2=descend, 3=approach. */
@@ -296,6 +297,30 @@ public class SchematicPrinter {
     private int scaffoldBreakTicks;
     private float scaffoldSavedYaw, scaffoldSavedPitch;
     private static final int MAX_SCAFFOLD_BREAK_TICKS = 60;
+
+    // area-clearing state
+    private BlockPos clearBreakTarget;
+    private int clearBreakTicks;
+    private float clearSavedYaw, clearSavedPitch;
+    private static final int MAX_CLEAR_BREAK_TICKS = 200;
+    private int clearBlocksBroken;
+    private boolean clearingDone;
+    private int clearCooldownTicks;
+    private int scaffoldCooldownTicks;
+    private static final int BREAK_COOLDOWN_TICKS = 6;
+    /** Consecutive clearing failures — triggers stall recovery on threshold. */
+    private int consecutiveClearFailures;
+    private static final int MAX_CONSECUTIVE_CLEAR_FAILURES = 20;
+    /** Stall-recovery resets done — gives up after MAX. */
+    private int clearStallResets;
+    private static final int MAX_CLEAR_STALL_RESETS = 3;
+    /** Unreachable clearing targets — LRU-evicted at 64. */
+    private final Set<BlockPos> failedClearTargets = Collections.newSetFromMap(
+            new LinkedHashMap<>(32, 0.75f, false) {
+                @Override protected boolean removeEldestEntry(Map.Entry<BlockPos, Boolean> eldest) {
+                    return size() > 64;
+                }
+            });
 
     // shulker unloading state
     /** Sub-phase: 0=find, 1=swap, 2=place, 3=wait, 4=open, 5=take, 6=break, 7=breaking, 8=pickup. */
@@ -312,8 +337,7 @@ public class SchematicPrinter {
     private int shulkerSyncDelay;
     private int shulkerUnloadFailures;
     private static final int MAX_SHULKER_FAILURES = 3;
-    /** When set, startRestockRun walks to a supply chest instead of
-     *  trying the shulker-in-inventory shortcut. Cleared on arrival. */
+    /** Skip shulker shortcut — walk to supply chest instead. */
     private boolean shulkerNoSpaceSkipped;
     private int platformBuildAttempts;
     private static final int MAX_PLATFORM_ATTEMPTS = 3;
@@ -324,18 +348,27 @@ public class SchematicPrinter {
     private static final int SCAFFOLD_SCAN_INTERVAL = 10;
     private int scaffoldScanCooldown;
 
+    // dump state — depositing mined items during clearing
+    /** Position we were clearing before the dump detour. */
+    private BlockPos preDumpClearPos;
+    /** The dump chest we're walking to / depositing into. */
+    private BlockPos dumpTarget;
+    /** Ticks waiting for the dump chest screen to open. */
+    private int dumpWaitTicks;
+    /** Ticks since the dump chest screen first appeared. */
+    private int dumpSyncDelay;
+    private static final int DUMP_SYNC_DELAY = 3;
+
     private int placementCheckCooldown;
 
-    /** Ticks until next SchematicWorld anchor correlation check.
-     *  Starts at 1 so the first check runs almost immediately after enable. */
+    /** Ticks until next anchor correlation check (starts at 1). */
     private int anchorCorrelationCooldown;
     /** Interval (ticks) between automatic SchematicWorld anchor checks. */
     private static final int ANCHOR_CORRELATION_INTERVAL = 200;
     /** Whether the anchor has been confirmed via SchematicWorld correlation. */
     private boolean anchorCorrelated;
 
-    /** True when loaded via Litematica auto-detect (subject to
-     *  periodic placement validation and re-detection on enable). */
+    /** True when loaded via Litematica auto-detect. */
     private boolean autoDetected;
 
     private static final int RESTOCK_THRESHOLD = 64;
@@ -348,8 +381,7 @@ public class SchematicPrinter {
     private static final int MAX_RESTOCK_FAILURES = 6;
 
     // cached schematic scan results
-    /** How often (in ticks) to recompute the expensive full-schematic
-     *  scans for remaining block counts. */
+    /** TTL for full-schematic remaining-block scans. */
     private static final int REMAINING_CACHE_TTL = 100; // ~5 seconds
     private long remainingCacheTick = Long.MIN_VALUE;
     private int  cachedCountRemaining = -1;
@@ -378,34 +410,28 @@ public class SchematicPrinter {
     private void enable() {
         enabled = true;
 
-        // Always try to detect / sync with Litematica first.
-        // For fresh sessions (nothing loaded) or stale auto-detects,
-        // do a full re-detect.  For manually loaded schematics, try
-        // to sync the anchor from a matching Litematica placement so
-        // /printer load + Litematica placement stay aligned.
+        // Sync with Litematica: full re-detect if nothing loaded,
+        // anchor-only sync for manually loaded schematics.
+        boolean litematicaSynced = false;
         if (schematic == null || anchor == null || autoDetected) {
             if (tryAutoDetect()) {
                 ChatHelper.labelled("Printer", "§aLoaded §f" + schematic.getName()
                         + " §7(" + schematic.getTotalNonAir() + " blocks)");
+                litematicaSynced = true;
             } else if (schematic == null || anchor == null) {
                 ChatHelper.info("§cNo schematic loaded. Use /printer load <file> or load one in Litematica.");
             }
         } else {
-            // Manual load — only try to resync the anchor from a matching
-            // Litematica placement.  Do NOT call tryAutoDetect() here —
-            // it would replace the manually loaded schematic with a
-            // different one if filenames collide (e.g. two "Unnamed"
-            // builds).  The SchematicWorld correlation on the next tick
-            // will fix the anchor if trySyncAnchor() fails.
-            if (!trySyncAnchor()) {
+            // Manual load — resync anchor only (avoid replacing schematic).
+            if (trySyncAnchor()) {
+                litematicaSynced = true;
+            } else {
                 ChatHelper.info("§7Anchor unchanged — SchematicWorld correlation "
                         + "will auto-align on next tick.");
             }
         }
 
-        // SchematicWorld anchor correlation runs automatically on the
-        // next tick (anchorCorrelationCooldown = 1) — no need to do it
-        // here.  This avoids delaying enable() with a heavy scan.
+        // SchematicWorld correlation will auto-align on next tick if needed.
 
         if (schematic != null && anchor != null) {
             ChatHelper.info("Printing §a" + schematic.getName()
@@ -419,12 +445,18 @@ public class SchematicPrinter {
                     + ") → (" + x2 + ", " + y2 + ", " + z2 + ")");
             warnIfAnchorSuspicious();
             if (autoBuild) { 
-                ChatHelper.info("§bAutoBuild §aenabled §7— walk + restock is automatic.");
+                ChatHelper.info("§bAutoBuild §aenabled §7— clearing illegal blocks, then building.");
             }
         }
 
         blocksPlaced = 0;
-        autoState = AutoState.BUILDING;
+        clearBlocksBroken = 0;
+        clearingDone = false;
+        clearBreakTarget = null;
+        consecutiveClearFailures = 0;
+        clearStallResets = 0;
+        failedClearTargets.clear();
+        autoState = AutoState.CLEARING_AREA;
         noProgressTicks = 0;
         idleScanCooldown = 0;
         failedZones.clear();
@@ -443,8 +475,20 @@ public class SchematicPrinter {
         shulkerNoSpaceSkipped = false;
         placementCheckCooldown = 0;
         skippedItemRecheckCooldown = SKIPPED_RECHECK_INTERVAL;
-        anchorCorrelationCooldown = 1; // run on next tick
-        anchorCorrelated = false;
+        preDumpClearPos = null;
+        dumpTarget = null;
+        dumpWaitTicks = 0;
+        dumpSyncDelay = 0;
+        // If Litematica placement data provided the anchor, trust it
+        // and skip the immediate hologram correlation — the heuristic
+        // scan can produce wrong anchors when many blocks share state.
+        if (litematicaSynced) {
+            anchorCorrelationCooldown = ANCHOR_CORRELATION_INTERVAL;
+            anchorCorrelated = true;
+        } else {
+            anchorCorrelationCooldown = 1; // hologram scan on next tick
+            anchorCorrelated = false;
+        }
 
         PlacementEngine.clearCorrectionHistory();
         PlacementEngine.resetRejectionCounters();
@@ -463,13 +507,23 @@ public class SchematicPrinter {
             *//*?} else {*/
             if (client.world != null && client.player != null) {
             /*?}*/
+                // Check for illegal blocks first (clearing phase)
+                /*? if >=26.1 {*//*
+                BlockPos clearTarget = findNextClearTarget(client.player, client.level);
+                *//*?} else {*/
+                BlockPos clearTarget = findNextClearTarget(client.player, client.world);
+                /*?}*/
+                if (clearTarget == null) {
+                    // No illegal blocks — skip to build phase
+                    clearingDone = true;
+                }
                 /*? if >=26.1 {*//*
                 BlockPos zone = findNextBuildZone(client.player, client.level);
                 *//*?} else {*/
                 BlockPos zone = findNextBuildZone(client.player, client.world);
                 /*?}*/
-                if (zone == null) {
-                    // No unbuilt blocks in loaded chunks — check unloaded
+                if (zone == null && clearTarget == null) {
+                    // No work in loaded chunks — check unloaded
                     /*? if >=26.1 {*//*
                     BlockPos unloaded = findUnloadedBuildZone(client.player, client.level);
                     *//*?} else {*/
@@ -478,7 +532,7 @@ public class SchematicPrinter {
                     if (unloaded != null) {
                         ChatHelper.info("§bBuild site not loaded — walking there...");
                         PathWalker.walkToNearby(unloaded, (int) Math.ceil(range));
-                        autoState = AutoState.WALKING_TO_BUILD;
+                        autoState = AutoState.WALKING_TO_CLEAR;
                     }
                 }
             }
@@ -498,6 +552,16 @@ public class SchematicPrinter {
         if (statusMessages) {
             ChatHelper.info("Stopped. §e" + blocksPlaced + "§f blocks placed this session.");
         }
+    }
+
+    /** Release all accumulated state on world disconnect to prevent leaks. */
+    public void onDisconnect() {
+        if (enabled) disable();
+        unreachableChests.clear();
+        skippedItems.clear();
+        failedZones.clear();
+        failedClearTargets.clear();
+        lastMissingItems.clear();
     }
 
     // LITEMATICA AUTO-DETECTION
@@ -601,15 +665,7 @@ public class SchematicPrinter {
         }
     }
 
-    /**
-     * If a schematic is already loaded, look for a matching Litematica
-     * placement (by filename) and update the anchor to match its
-     * world-space origin.  This fixes misalignment when the schematic
-     * was loaded via /printer load (which uses the player's
-     * feet position) or when the user moved the placement in Litematica.
-     *
-     * @return true if the anchor was updated
-     */
+    /** Syncs anchor to the matching Litematica placement origin. */
     private boolean trySyncAnchor() {
         if (schematic == null || schematicFile == null) return false;
 
@@ -785,7 +841,13 @@ public class SchematicPrinter {
         if (enabled && autoBuild && old != null && newAnchor != null
                 && !old.equals(newAnchor)) {
             PathWalker.stop();
-            autoState = AutoState.BUILDING;
+            clearingDone = false;
+            clearBreakTarget = null;
+            clearBlocksBroken = 0;
+            consecutiveClearFailures = 0;
+            clearStallResets = 0;
+            failedClearTargets.clear();
+            autoState = AutoState.CLEARING_AREA;
             noProgressTicks = 0;
             failedZones.clear();
             lastWalkTargetZone = null;
@@ -864,30 +926,38 @@ public class SchematicPrinter {
             PlacementEngine.pruneCompletedCorrections();
         }
 
-        // Automatic SchematicWorld anchor correlation.
-        // On first tick after enable (cooldown=1) and then every
-        // ANCHOR_CORRELATION_INTERVAL ticks, read hologram blocks
-        // from Litematica's SchematicWorld and adjust the anchor.
+        // Periodic anchor re-sync.  Prefer authoritative Litematica
+        // placement data over the heuristic hologram correlation —
+        // the hologram scan can produce wrong anchors when many blocks
+        // share the same state (e.g. stone, dirt).
         if (schematic != null && --anchorCorrelationCooldown <= 0) {
             anchorCorrelationCooldown = ANCHOR_CORRELATION_INTERVAL;
-            BlockPos correlated = LitematicaDetector.detectAnchorFromSchematicWorld(schematic);
-            if (correlated != null) {
-                if (!correlated.equals(anchor)) {
-                    this.anchor = correlated;
-                    if (statusMessages) {
-                        ChatHelper.info("§aAnchor auto-aligned from hologram blocks → §e"
-                                + correlated.getX() + " " + correlated.getY() + " " + correlated.getZ());
+            BlockPos prevAnchor = this.anchor;
+            boolean synced = trySyncAnchor();
+            if (!synced) {
+                BlockPos correlated = LitematicaDetector.detectAnchorFromSchematicWorld(schematic);
+                if (correlated != null) {
+                    if (!correlated.equals(anchor)) {
+                        this.anchor = correlated;
+                        if (statusMessages) {
+                            ChatHelper.info("§aAnchor auto-aligned from hologram blocks → §e"
+                                    + correlated.getX() + " " + correlated.getY() + " " + correlated.getZ());
+                        }
                     }
-                    // Reset walk state so Baritone targets the new anchor
-                    PathWalker.stop();
-                    if (autoBuild) {
-                        autoState = AutoState.BUILDING;
-                        noProgressTicks = 0;
-                        failedZones.clear();
-                        lastWalkTargetZone = null;
-                    }
+                    anchorCorrelated = true;
                 }
+            } else {
                 anchorCorrelated = true;
+            }
+            // If the anchor changed (by either method), reset walk state
+            if (anchor != null && !anchor.equals(prevAnchor)) {
+                PathWalker.stop();
+                if (autoBuild) {
+                    autoState = clearingDone ? AutoState.BUILDING : AutoState.CLEARING_AREA;
+                    noProgressTicks = 0;
+                    failedZones.clear();
+                    lastWalkTargetZone = null;
+                }
             }
         }
 
@@ -966,6 +1036,10 @@ public class SchematicPrinter {
         }
 
         switch (autoState) {
+            case CLEARING_AREA       -> tickClearingArea(mc);
+            case WALKING_TO_CLEAR    -> tickWalking(mc, AutoState.CLEARING_AREA);
+            case WALKING_TO_DUMP     -> tickWalking(mc, AutoState.DUMPING);
+            case DUMPING             -> tickDumping(mc);
             case BUILDING            -> tickBuilding(mc);
             case WALKING_TO_BUILD    -> tickWalking(mc, AutoState.BUILDING);
             case WALKING_BACK        -> tickWalking(mc, AutoState.BUILDING);
@@ -1449,15 +1523,7 @@ public class SchematicPrinter {
         // Stay in BUILDING — tryPlaceNextBlock will skip these items
     }
 
-    /**
-     * Attempts to find and walk to the next build zone that has blocks
-     * the player can actually place (has the items for).
-     * Computes a safe standing position near the target — a spot with
-     * solid ground, clear head room, and not inside the schematic's
-     * unbuilt footprint — then navigates there with walkTo.
-     *
-     * @return true if a zone was found and navigation started
-     */
+    /** Finds the next build zone and starts walking to it. */
     /*? if >=26.1 {*//*
     private boolean tryWalkToNextZone(Minecraft mc) {
     *//*?} else {*/
@@ -1759,17 +1825,20 @@ public class SchematicPrinter {
                 BlockPos walkTarget = PathWalker.getTarget();
                 boolean pathImpossible = PathWalker.isStuck();
 
-                // Only retry with wider radius if Baritone timed out
-                // rather than declaring the path impossible.  If stuck
-                // (A* found no route), a wider radius won't help — skip
-                // straight to escalation or failure.
-                if (!pathImpossible && walkFailCount < MAX_WALK_RETRIES) {
+                // Retry with wider radius.  For clearing, retry even
+                // when stuck — the illegal blocks ARE the obstacles and
+                // a wider GoalNear gives Baritone room to path around
+                // the cluster into open space.
+                boolean clearingRetry = arrivalState == AutoState.CLEARING_AREA;
+                if ((clearingRetry || !pathImpossible)
+                        && walkFailCount < MAX_WALK_RETRIES) {
                     // Retry near the BUILD ZONE (not the standing position
                     // that may be across a gap) with increasing radius.
                     BlockPos retryTarget = lastWalkTargetZone != null
                             ? lastWalkTargetZone : walkTarget;
                     if (retryTarget != null) {
-                        int radius = (int) Math.ceil(range) + walkFailCount;
+                        int extra = clearingRetry ? 3 * walkFailCount : walkFailCount;
+                        int radius = (int) Math.ceil(range) + extra;
                         PathWalker.walkToNearby(retryTarget, radius);
                         LOGGER.debug("Path blocked, trying wider approach (r={})", radius);
                         return; // stay in walking state
@@ -1781,7 +1850,8 @@ public class SchematicPrinter {
                 // All walk retries exhausted.  If the player is already
                 // close enough to the target, fall back to building
                 // from here rather than escalating further.
-                if (arrivalState == AutoState.BUILDING) {
+                if (arrivalState == AutoState.BUILDING
+                        || arrivalState == AutoState.CLEARING_AREA) {
                     boolean inRange = false;
                     if (lastWalkTargetZone != null) {
                         /*? if >=26.1 {*//*
@@ -1818,6 +1888,18 @@ public class SchematicPrinter {
                     }
                 }
 
+                // For clearing, try vanilla straight-line walk when
+                // Baritone can't pathfind — the target is usually on
+                // the same Y level and a direct WASD walk can reach it.
+                if (!triedPlacementWalk
+                        && arrivalState == AutoState.CLEARING_AREA
+                        && lastWalkTargetZone != null) {
+                    triedPlacementWalk = true;
+                    LOGGER.debug("Can't path to clear target — trying vanilla walk");
+                    PathWalker.walkToVanilla(lastWalkTargetZone);
+                    return;
+                }
+
                 // If the target was above (or far from) us and we
                 // haven't already tried placement, escalate to
                 // waypoint-based placement walk.
@@ -1844,6 +1926,10 @@ public class SchematicPrinter {
                 // Mark BOTH the walk target and the build target zone as failed
                 if (walkTarget != null) failedZones.add(walkTarget);
                 if (lastWalkTargetZone != null) failedZones.add(lastWalkTargetZone);
+                if (arrivalState == AutoState.CLEARING_AREA && lastWalkTargetZone != null) {
+                    failedClearTargets.add(lastWalkTargetZone);
+                    consecutiveClearFailures++;
+                }
                 autoState = arrivalState;
                 noProgressTicks = 0;
             }
@@ -1856,7 +1942,8 @@ public class SchematicPrinter {
         // and let the build-tick try placement from the current spot.
         // We give Baritone 30 ticks first so it has a real chance to
         // reposition the player to a better angle.
-        if (arrivalState == AutoState.BUILDING
+        if ((arrivalState == AutoState.BUILDING
+                || arrivalState == AutoState.CLEARING_AREA)
                 && PathWalker.getTicksWalking() >= 30) {
             boolean closeEnough = false;
 
@@ -1924,14 +2011,8 @@ public class SchematicPrinter {
     }
 
     /**
-     * Scans blocks near the player and records any that Baritone likely
-     * placed as scaffold.  A block is considered scaffold if:
-     * 
-     *     - it matches one of Baritone's acceptable throwaway items, AND
-     *     - the schematic expects air (or nothing) at that position.
-     * 
-     * Called periodically during placement walks so scaffold blocks are
-     * tracked as they appear.
+     * Records nearby blocks Baritone placed as scaffold (matches throwaway
+     * items + schematic expects air). Called during placement walks.
      */
     /*? if >=26.1 {*//*
     private void scanForScaffoldBlocks(LocalPlayer player, Level world) {
@@ -1987,18 +2068,449 @@ public class SchematicPrinter {
         }
     }
 
+    // Area clearing
+    // Mirrors the building scan: findNextClearTarget is the inverse of
+    // findNextBuildZone, and tryClearNextBlock is the inverse of
+    // tryPlaceNextBlock.  Building fills air with blocks; clearing
+    // fills blocks with air.
+
     /**
-     * Breaks scaffold blocks one at a time.  When all tracked scaffold
-     * has been removed, transitions to AutoState#IDLE.
-     *
-     * Flow:
-     * 
-     *     - If no target, pick the next scaffold position from the database.
-     *     - If out of reach, walk to it via Baritone.
-     *     - Look at it and begin breaking (attackBlock + updateBlockBreakingProgress).
-     *     - Once broken (world block is air), remove from DB and pick next.
-     * 
+     * Scan blocks within reach and break the nearest illegal one.
+     * Mirrors tryPlaceNextBlock() but breaks instead of placing.
      */
+    /*? if >=26.1 {*//*
+    private boolean tryClearNextBlock(LocalPlayer player, Level world) {
+    *//*?} else {*/
+    private boolean tryClearNextBlock(ClientPlayerEntity player, World world) {
+    /*?}*/
+        double rangeSq = range * range;
+        int maxReach = (int) Math.ceil(range);
+
+        /*? if >=26.1 {*//*
+        BlockPos playerPos = player.blockPosition();
+        *//*?} else {*/
+        BlockPos playerPos = player.getBlockPos();
+        /*?}*/
+
+        /*? if >=26.1 {*//*
+        Vec3 eye = player.getEyePosition();
+        *//*?} else {*/
+        Vec3d eye = player.getEyePos();
+        /*?}*/
+
+        // Top-down demolition: prefer highest Y to avoid gravity drops
+        int px = playerPos.getX(), py = playerPos.getY(), pz = playerPos.getZ();
+        BlockPos best = null;
+        double bestDist = Double.MAX_VALUE;
+        /*? if >=26.1 {*//*
+        BlockPos.MutableBlockPos mutablePos = new BlockPos.MutableBlockPos();
+        *//*?} else {*/
+        BlockPos.Mutable mutablePos = new BlockPos.Mutable();
+        /*?}*/
+
+        for (int dy = maxReach; dy >= -maxReach; dy--) {
+            for (int dx = -maxReach; dx <= maxReach; dx++) {
+                for (int dz = -maxReach; dz <= maxReach; dz++) {
+                    int wx = px + dx, wy = py + dy, wz = pz + dz;
+
+                    /*? if >=26.1 {*//*
+                    double dist = eye.distanceToSqr(wx + 0.5, wy + 0.5, wz + 0.5);
+                    *//*?} else {*/
+                    double dist = eye.squaredDistanceTo(wx + 0.5, wy + 0.5, wz + 0.5);
+                    /*?}*/
+                    if (dist > rangeSq) continue;
+
+                    int sx = wx - anchor.getX();
+                    int sy = wy - anchor.getY();
+                    int sz = wz - anchor.getZ();
+                    if (!schematic.contains(sx, sy, sz)) continue;
+
+                    mutablePos.set(wx, wy, wz);
+                    BlockState target = schematic.getBlockState(sx, sy, sz);
+                    BlockState existing = world.getBlockState(mutablePos);
+
+                    if (isEffectivelyPlaced(existing, target)) continue;
+                    if (existing.isAir()) continue;
+                    /*? if >=26.1 {*//*
+                    if (existing.canBeReplaced()) continue;
+                    *//*?} else {*/
+                    if (existing.isReplaceable()) continue;
+                    /*?}*/
+                    if (failedClearTargets.contains(mutablePos)) continue;
+
+                    // Prefer highest-Y, then nearest to eye
+                    if (best != null) {
+                        if (wy < best.getY()) continue;
+                        if (wy == best.getY() && dist >= bestDist) continue;
+                    }
+                    bestDist = dist;
+                    /*? if >=26.1 {*//*
+                    best = mutablePos.immutable();
+                    *//*?} else {*/
+                    best = mutablePos.toImmutable();
+                    /*?}*/
+                }
+            }
+        }
+
+        if (best == null) return false;
+
+        // Start breaking
+        /*? if >=26.1 {*//*
+        Minecraft mc = Minecraft.getInstance();
+        *//*?} else {*/
+        MinecraftClient mc = MinecraftClient.getInstance();
+        /*?}*/
+        /*? if >=26.1 {*//*
+        clearBreakTarget = best.immutable();
+        *//*?} else {*/
+        clearBreakTarget = best.toImmutable();
+        /*?}*/
+        clearBreakTicks = 0;
+        /*? if >=26.1 {*//*
+        clearSavedYaw = mc.player.getYRot();
+        clearSavedPitch = mc.player.getXRot();
+        *//*?} else {*/
+        clearSavedYaw = mc.player.getYaw();
+        clearSavedPitch = mc.player.getPitch();
+        /*?}*/
+
+        BlockState clearState = world.getBlockState(clearBreakTarget);
+        PlacementEngine.selectBestTool(mc.player, mc, clearState);
+
+        // Look at block center and start breaking
+        /*? if >=26.1 {*//*
+        Vec3 blockCenter = Vec3.atCenterOf(clearBreakTarget);
+        Vec3 toBlock = blockCenter.subtract(eye);
+        *//*?} else {*/
+        Vec3d blockCenter = Vec3d.ofCenter(clearBreakTarget);
+        Vec3d toBlock = blockCenter.subtract(eye);
+        /*?}*/
+        double horizDist = Math.sqrt(toBlock.x * toBlock.x + toBlock.z * toBlock.z);
+        /*? if >=26.1 {*//*
+        float breakYaw = (float) (Mth.atan2(toBlock.z, toBlock.x) * (180.0 / Math.PI)) - 90.0f;
+        float breakPitch = (float) -(Mth.atan2(toBlock.y, horizDist) * (180.0 / Math.PI));
+        *//*?} else {*/
+        float breakYaw = (float) (MathHelper.atan2(toBlock.z, toBlock.x) * (180.0 / Math.PI)) - 90.0f;
+        float breakPitch = (float) -(MathHelper.atan2(toBlock.y, horizDist) * (180.0 / Math.PI));
+        /*?}*/
+        PlacementEngine.setLookRotation(mc.player, breakYaw,
+                /*? if >=26.1 {*//*
+                Mth.clamp(breakPitch, -90.0f, 90.0f));
+                *//*?} else {*/
+                MathHelper.clamp(breakPitch, -90.0f, 90.0f));
+                /*?}*/
+
+        /*? if >=26.1 {*//*
+        mc.gameMode.startDestroyBlock(clearBreakTarget, Direction.UP);
+        mc.player.swing(InteractionHand.MAIN_HAND);
+        *//*?} else {*/
+        mc.interactionManager.attackBlock(clearBreakTarget, Direction.UP);
+        mc.player.swingHand(Hand.MAIN_HAND);
+        /*?}*/
+
+        LOGGER.debug("Clearing illegal block at {} {} {}",
+                clearBreakTarget.getX(), clearBreakTarget.getY(),
+                clearBreakTarget.getZ());
+        return true;
+    }
+
+    /**
+     * Find the nearest illegal block in the schematic — mirrors
+     * findNextBuildZone().  Used as a walk target when nothing is
+     * within reach.  Prefers highest Y (top-down clearing), then
+     * nearest to player.
+     */
+    /*? if >=26.1 {*//*
+    private BlockPos findNextClearTarget(LocalPlayer player, Level world) {
+    *//*?} else {*/
+    private BlockPos findNextClearTarget(ClientPlayerEntity player, World world) {
+    /*?}*/
+        if (player == null || world == null || schematic == null || anchor == null) return null;
+
+        /*? if >=26.1 {*//*
+        Vec3 playerPos = player.position();
+        *//*?} else if >=1.21.10 {*//*
+        Vec3d playerPos = player.getSyncedPos();
+        *//*?} else {*/
+        Vec3d playerPos = player.getPos();
+        /*?}*/
+
+        BlockPos best = null;
+        double bestDist = Double.MAX_VALUE;
+        /*? if >=26.1 {*//*
+        BlockPos.MutableBlockPos mutablePos = new BlockPos.MutableBlockPos();
+        *//*?} else {*/
+        BlockPos.Mutable mutablePos = new BlockPos.Mutable();
+        /*?}*/
+
+        for (LitematicaSchematic.Region region : schematic.getRegions()) {
+            for (int y = region.absY - 1; y >= 0; y--) {
+                for (int z = 0; z < region.absZ; z++) {
+                    for (int x = 0; x < region.absX; x++) {
+                        BlockState target = region.getBlockState(x, y, z);
+
+                        int wx = anchor.getX() + region.originX + x;
+                        int wy = anchor.getY() + region.originY + y;
+                        int wz = anchor.getZ() + region.originZ + z;
+
+                        /*? if >=26.1 {*//*
+                        if (!world.hasChunk(wx >> 4, wz >> 4)) continue;
+                        *//*?} else {*/
+                        if (!world.isChunkLoaded(wx >> 4, wz >> 4)) continue;
+                        /*?}*/
+
+                        mutablePos.set(wx, wy, wz);
+                        BlockState existing = world.getBlockState(mutablePos);
+
+                        if (isEffectivelyPlaced(existing, target)) continue;
+                        if (existing.isAir()) continue;
+                        /*? if >=26.1 {*//*
+                        if (existing.canBeReplaced()) continue;
+                        *//*?} else {*/
+                        if (existing.isReplaceable()) continue;
+                        /*?}*/
+                        if (failedClearTargets.contains(mutablePos)) continue;
+
+                        // Prefer highest Y, then nearest
+                        /*? if >=26.1 {*//*
+                        double dist = playerPos.distanceToSqr(wx + 0.5, wy + 0.5, wz + 0.5);
+                        *//*?} else {*/
+                        double dist = playerPos.squaredDistanceTo(wx + 0.5, wy + 0.5, wz + 0.5);
+                        /*?}*/
+                        if (best != null) {
+                            if (wy < best.getY()) continue;
+                            if (wy == best.getY() && dist >= bestDist) continue;
+                        }
+                        bestDist = dist;
+                        /*? if >=26.1 {*//*
+                        best = mutablePos.immutable();
+                        *//*?} else {*/
+                        best = mutablePos.toImmutable();
+                        /*?}*/
+                    }
+                }
+            }
+        }
+        return best;
+    }
+
+    /**
+     * Clears illegal blocks from the schematic footprint.
+     * Mirrors the building tick: try breaking in-reach blocks first
+     * (tryClearNextBlock), then walk to the nearest remaining illegal
+     * block if nothing is nearby.  Building fills air → blocks;
+     * clearing fills blocks → air.
+     */
+    /*? if >=26.1 {*//*
+    private void tickClearingArea(Minecraft mc) {
+    *//*?} else {*/
+    private void tickClearingArea(MinecraftClient mc) {
+    /*?}*/
+        /*? if >=26.1 {*//*
+        Level world = mc.level;
+        *//*?} else {*/
+        World world = mc.world;
+        /*?}*/
+
+        // ── If PlacementEngine is actively breaking / placing, wait ──
+        if (PlacementEngine.isBusy()) return;
+
+        // Continue breaking current target
+        if (clearBreakTarget != null) {
+            BlockState current = world.getBlockState(clearBreakTarget);
+            /*? if >=26.1 {*//*
+            if (current.isAir() || current.canBeReplaced()) {
+            *//*?} else {*/
+            if (current.isAir() || current.isReplaceable()) {
+            /*?}*/
+                // Block broken
+                /*? if >=26.1 {*//*
+                mc.gameMode.stopDestroyBlock();
+                *//*?} else {*/
+                mc.interactionManager.cancelBlockBreaking();
+                /*?}*/
+                /*? if >=26.1 {*//*
+                mc.player.setYRot(clearSavedYaw);
+                *//*?} else {*/
+                mc.player.setYaw(clearSavedYaw);
+                /*?}*/
+                /*? if >=26.1 {*//*
+                mc.player.setXRot(clearSavedPitch);
+                *//*?} else {*/
+                mc.player.setPitch(clearSavedPitch);
+                /*?}*/
+                clearBlocksBroken++;
+                consecutiveClearFailures = 0;
+                clearStallResets = 0;
+                clearBreakTarget = null;
+                clearBreakTicks = 0;
+                clearCooldownTicks = BREAK_COOLDOWN_TICKS;
+                return;
+            }
+
+            clearBreakTicks++;
+            if (clearBreakTicks > MAX_CLEAR_BREAK_TICKS) {
+                // Timed out — skip this block
+                /*? if >=26.1 {*//*
+                mc.gameMode.stopDestroyBlock();
+                *//*?} else {*/
+                mc.interactionManager.cancelBlockBreaking();
+                /*?}*/
+                /*? if >=26.1 {*//*
+                mc.player.setYRot(clearSavedYaw);
+                *//*?} else {*/
+                mc.player.setYaw(clearSavedYaw);
+                /*?}*/
+                /*? if >=26.1 {*//*
+                mc.player.setXRot(clearSavedPitch);
+                *//*?} else {*/
+                mc.player.setPitch(clearSavedPitch);
+                /*?}*/
+                LOGGER.debug("Clear break timed out at {} {} {}",
+                        clearBreakTarget.getX(), clearBreakTarget.getY(),
+                        clearBreakTarget.getZ());
+                failedClearTargets.add(clearBreakTarget);
+                consecutiveClearFailures++;
+                clearBreakTarget = null;
+                clearBreakTicks = 0;
+                clearCooldownTicks = BREAK_COOLDOWN_TICKS;
+                return;
+            }
+
+            // Continue breaking — maintain look direction
+            /*? if >=26.1 {*//*
+            Vec3 eyePos = mc.player.getEyePosition();
+            *//*?} else {*/
+            Vec3d eyePos = mc.player.getEyePos();
+            /*?}*/
+            /*? if >=26.1 {*//*
+            Vec3 blockCenter = Vec3.atCenterOf(clearBreakTarget);
+            *//*?} else {*/
+            Vec3d blockCenter = Vec3d.ofCenter(clearBreakTarget);
+            /*?}*/
+            /*? if >=26.1 {*//*
+            Vec3 toBlock = blockCenter.subtract(eyePos);
+            *//*?} else {*/
+            Vec3d toBlock = blockCenter.subtract(eyePos);
+            /*?}*/
+            double horizDist = Math.sqrt(toBlock.x * toBlock.x + toBlock.z * toBlock.z);
+            /*? if >=26.1 {*//*
+            float breakYaw = (float) (Mth.atan2(toBlock.z, toBlock.x) * (180.0 / Math.PI)) - 90.0f;
+            *//*?} else {*/
+            float breakYaw = (float) (MathHelper.atan2(toBlock.z, toBlock.x) * (180.0 / Math.PI)) - 90.0f;
+            /*?}*/
+            /*? if >=26.1 {*//*
+            float breakPitch = (float) -(Mth.atan2(toBlock.y, horizDist) * (180.0 / Math.PI));
+            *//*?} else {*/
+            float breakPitch = (float) -(MathHelper.atan2(toBlock.y, horizDist) * (180.0 / Math.PI));
+            /*?}*/
+            PlacementEngine.setLookRotation(mc.player, breakYaw,
+                    /*? if >=26.1 {*//*
+                    Mth.clamp(breakPitch, -90.0f, 90.0f));
+                    *//*?} else {*/
+                    MathHelper.clamp(breakPitch, -90.0f, 90.0f));
+                    /*?}*/
+
+            /*? if >=26.1 {*//*
+            mc.gameMode.continueDestroyBlock(clearBreakTarget, Direction.UP);
+            *//*?} else {*/
+            mc.interactionManager.updateBlockBreakingProgress(clearBreakTarget, Direction.UP);
+            /*?}*/
+            /*? if >=26.1 {*//*
+            mc.player.swing(InteractionHand.MAIN_HAND);
+            *//*?} else {*/
+            mc.player.swingHand(Hand.MAIN_HAND);
+            /*?}*/
+            return;
+        }
+
+        // Inter-block cooldown to avoid FastBreak detection
+        if (clearCooldownTicks > 0) {
+            clearCooldownTicks--;
+            return;
+        }
+
+        // Dump inventory if nearly full
+        if (MoarMod.getChestManager().dumpChestCount() > 0
+                && MoarMod.getChestManager().isInventoryFull(mc)) {
+            startDumpRun(mc);
+            return;
+        }
+
+        // ── Try breaking an in-range block (mirrors tryPlaceNextBlock) ──
+        if (tryClearNextBlock(mc.player, world)) {
+            return;
+        }
+
+        // Nothing in reach — stall detection
+        if (consecutiveClearFailures >= MAX_CONSECUTIVE_CLEAR_FAILURES) {
+            clearStallResets++;
+            if (clearStallResets > MAX_CLEAR_STALL_RESETS) {
+                if (statusMessages) {
+                    ChatHelper.info("§eCan't reach remaining illegal blocks — building from here.");
+                }
+                LOGGER.warn("Clearing gave up after {} stall resets ({} blocks broken)",
+                        clearStallResets - 1, clearBlocksBroken);
+                clearingDone = true;
+                autoState = AutoState.BUILDING;
+                noProgressTicks = 0;
+                return;
+            }
+            // Recovery: reset failed targets and retry
+            LOGGER.info("Clearing stall recovery {}/{} — resetting {} failed targets",
+                    clearStallResets, MAX_CLEAR_STALL_RESETS,
+                    failedClearTargets.size());
+            if (statusMessages) {
+                ChatHelper.info("§eClearing stalled — retrying unreachable blocks ("
+                        + clearStallResets + "/" + MAX_CLEAR_STALL_RESETS + ")");
+            }
+            failedClearTargets.clear();
+            consecutiveClearFailures = 0;
+            // Fall through to find next target with a clean slate
+        }
+
+        // Find walk target (mirrors findNextBuildZone)
+        BlockPos target = findNextClearTarget(mc.player, world);
+
+        if (target == null && !failedClearTargets.isEmpty()) {
+            clearStallResets++;
+            if (clearStallResets <= MAX_CLEAR_STALL_RESETS) {
+                if (statusMessages) {
+                    ChatHelper.info("§eAll targets skipped — retrying ("
+                            + clearStallResets + "/" + MAX_CLEAR_STALL_RESETS + ")");
+                }
+                failedClearTargets.clear();
+                consecutiveClearFailures = 0;
+                target = findNextClearTarget(mc.player, world);
+            }
+        }
+        if (target == null) {
+            clearingDone = true;
+            if (statusMessages) {
+                if (clearBlocksBroken > 0) {
+                    ChatHelper.info("§aArea cleared! §7Removed §e" + clearBlocksBroken
+                            + "§7 illegal block(s). Commencing build...");
+                } else {
+                    ChatHelper.info("§aNo illegal blocks found. Commencing build...");
+                }
+            }
+            autoState = AutoState.BUILDING;
+            noProgressTicks = 0;
+            return;
+        }
+
+        // Walk to the zone — same pattern as building
+        PathWalker.walkToNearby(target, (int) Math.ceil(range) + 2);
+        /*? if >=26.1 {*//*
+        lastWalkTargetZone = target.immutable();
+        *//*?} else {*/
+        lastWalkTargetZone = target.toImmutable();
+        /*?}*/
+        autoState = AutoState.WALKING_TO_CLEAR;
+    }
+
+    /** Breaks scaffold blocks one at a time until all are removed. */
     /*? if >=26.1 {*//*
     private void tickCleaningScaffold(Minecraft mc) {
     *//*?} else {*/
@@ -2047,6 +2559,7 @@ public class SchematicPrinter {
                 PrinterDatabase.removeScaffold(scaffoldBreakTarget);
                 scaffoldBreakTarget = null;
                 scaffoldBreakTicks = 0;
+                scaffoldCooldownTicks = BREAK_COOLDOWN_TICKS;
                 return; // next tick will pick up next scaffold
             }
 
@@ -2071,6 +2584,7 @@ public class SchematicPrinter {
                 PrinterDatabase.removeScaffold(scaffoldBreakTarget);
                 scaffoldBreakTarget = null;
                 scaffoldBreakTicks = 0;
+                scaffoldCooldownTicks = BREAK_COOLDOWN_TICKS;
                 return;
             }
 
@@ -2101,7 +2615,7 @@ public class SchematicPrinter {
             *//*?} else {*/
             float breakPitch = (float) -(MathHelper.atan2(toBlock.y, horizDist) * (180.0 / Math.PI));
             /*?}*/
-            PlacementEngine.sendLookPacket(mc.player, breakYaw,
+            PlacementEngine.setLookRotation(mc.player, breakYaw,
                     /*? if >=26.1 {*//*
                     Mth.clamp(breakPitch, -90.0f, 90.0f));
                     *//*?} else {*/
@@ -2118,6 +2632,12 @@ public class SchematicPrinter {
             *//*?} else {*/
             mc.player.swingHand(Hand.MAIN_HAND);
             /*?}*/
+            return;
+        }
+
+        // Inter-block cooldown to avoid FastBreak detection
+        if (scaffoldCooldownTicks > 0) {
+            scaffoldCooldownTicks--;
             return;
         }
 
@@ -2256,7 +2776,7 @@ public class SchematicPrinter {
         *//*?} else {*/
         float breakPitch = (float) -(MathHelper.atan2(toBlock.y, horizDist) * (180.0 / Math.PI));
         /*?}*/
-        PlacementEngine.sendLookPacket(mc.player, breakYaw,
+        PlacementEngine.setLookRotation(mc.player, breakYaw,
                 /*? if >=26.1 {*//*
                 Mth.clamp(breakPitch, -90.0f, 90.0f));
                 *//*?} else {*/
@@ -2620,14 +3140,100 @@ public class SchematicPrinter {
         }
     }
 
+    // DUMP CHEST — deposit mined items to free inventory space during clearing
+
+    /*? if >=26.1 {*//*
+    private void tickDumping(Minecraft mc) {
+    *//*?} else {*/
+    private void tickDumping(MinecraftClient mc) {
+    /*?}*/
+        dumpWaitTicks++;
+
+        /*? if >=26.1 {*//*
+        AbstractContainerMenu handler = mc.player.containerMenu;
+        *//*?} else {*/
+        ScreenHandler handler = mc.player.currentScreenHandler;
+        /*?}*/
+        /*? if >=26.1 {*//*
+        if (handler instanceof ChestMenu containerHandler) {
+        *//*?} else {*/
+        if (handler instanceof GenericContainerScreenHandler containerHandler) {
+        /*?}*/
+            dumpSyncDelay++;
+            if (dumpSyncDelay < DUMP_SYNC_DELAY) return;
+
+            /*? if >=26.1 {*//*
+            int chestSlots = containerHandler.getRowCount() * 9;
+            *//*?} else {*/
+            int chestSlots = containerHandler.getRows() * 9;
+            /*?}*/
+            int playerSlotStart = chestSlots;
+            int playerSlotEnd = chestSlots + 36;
+
+            for (int slot = playerSlotStart; slot < playerSlotEnd; slot++) {
+                /*? if >=26.1 {*//*
+                ItemStack stack = containerHandler.getSlot(slot).getItem();
+                *//*?} else {*/
+                ItemStack stack = containerHandler.getSlot(slot).getStack();
+                /*?}*/
+                if (stack.isEmpty()) continue;
+                /*? if >=26.1 {*//*
+                if (stack.isDamageableItem()) continue;
+                *//*?} else {*/
+                if (stack.isDamageable()) continue;
+                /*?}*/
+                /*? if >=26.1 {*//*
+                mc.gameMode.handleContainerInput(
+                *//*?} else {*/
+                mc.interactionManager.clickSlot(
+                /*?}*/
+                        /*? if >=26.1 {*//*
+                        containerHandler.containerId, slot, 0,
+                        *//*?} else {*/
+                        containerHandler.syncId, slot, 0,
+                        /*?}*/
+                        /*? if >=26.1 {*//*
+                        ContainerInput.QUICK_MOVE, mc.player);
+                        *//*?} else {*/
+                        SlotActionType.QUICK_MOVE, mc.player);
+                        /*?}*/
+            }
+
+            /*? if >=26.1 {*//*
+            mc.player.clientSideCloseContainer();
+            *//*?} else {*/
+            mc.player.closeHandledScreen();
+            /*?}*/
+
+            if (statusMessages) {
+                ChatHelper.info("§aItems deposited. Resuming clearing.");
+            }
+
+            if (preDumpClearPos != null) {
+                PathWalker.walkToNearby(preDumpClearPos, (int) Math.ceil(range));
+                autoState = AutoState.WALKING_TO_CLEAR;
+            } else {
+                autoState = AutoState.CLEARING_AREA;
+            }
+            return;
+        }
+
+        // Chest hasn't opened yet — try right-clicking it
+        if (dumpWaitTicks == 1 && dumpTarget != null) {
+            tryOpenChest(mc, dumpTarget);
+        }
+
+        if (dumpWaitTicks >= CHEST_OPEN_TIMEOUT) {
+            if (statusMessages) {
+                ChatHelper.info("§eDump chest didn't open, resuming clearing.");
+            }
+            autoState = AutoState.CLEARING_AREA;
+        }
+    }
+
     // SHULKER UNLOADING — place → open → take items → break → pickup
 
-    /**
-     * Finds the first shulker box in the player's inventory (slots 0-35)
-     * that contains any of the needed items.
-     *
-     * @return the inventory slot index, or -1 if none found
-     */
+    /** Finds the first inventory shulker containing needed items, or -1. */
     /*? if >=26.1 {*//*
     private int findShulkerWithNeededItems(LocalPlayer player) {
     *//*?} else {*/
@@ -2652,12 +3258,7 @@ public class SchematicPrinter {
         return -1;
     }
 
-    /**
-     * Finds a valid position near the player to place a shulker box.
-     * Needs an air block with a solid block below it, within reach.
-     * Excludes the two blocks the player occupies (feet + head).
-     * Also requires 1 block of clearance above so the shulker lid can open.
-     */
+    /** Finds a valid nearby position to place a shulker box. */
     /*? if >=26.1 {*//*
     private BlockPos findShulkerPlaceSpot(LocalPlayer player, Level world) {
     *//*?} else {*/
@@ -2731,18 +3332,8 @@ public class SchematicPrinter {
     }
 
     /**
-     * Attempts to place a solid block adjacent to the player's standing
-     * position to create a platform for shulker box placement.  This is
-     * needed when the player is on a narrow pillar or 1-block ledge
-     * where findShulkerPlaceSpot returns null.
-     *
-     * Searches for an air block at the same Y level as the block the
-     * player is standing on, adjacent to any solid block (so we have a
-     * face to place against).  Then swaps a solid block from inventory
-     * into the hotbar and places it via interactBlock.
-     *
-     * @return true if a block was placed (caller should wait
-     *         a few ticks for server sync before retrying spot search)
+     * Places a solid block adjacent to the player to create a shulker platform.
+     * Used when findShulkerPlaceSpot returns null (narrow pillar/ledge).
      */
     /*? if >=26.1 {*//*
     private boolean tryBuildShulkerPlatform(LocalPlayer player,
@@ -3934,18 +4525,8 @@ public class SchematicPrinter {
     }
 
     /**
-     * Finds the lowest unbuilt block in the schematic that is above
-     * the player's current reach — used to determine where Baritone should
-     * path to next.
-     *
-     * By targeting the lowest unreached Y-level, the player moves up
-     * incrementally: go up a few layers, build what's there (bottom-up),
-     * then move up again when the next layer is above reach.  This
-     * avoids pathing to the very top of an unbuilt schematic where
-     * there's nothing to stand on.
-     *
-     * Among blocks at the target Y, the closest (by horizontal
-     * distance) is returned so the path is near the action.
+     * Finds the lowest unbuilt block above the player's reach.
+     * Among same-Y candidates, prefers nearest by horizontal distance.
      */
     /*? if >=26.1 {*//*
     private BlockPos findHighBuildZone(LocalPlayer player, Level world) {
@@ -4047,6 +4628,55 @@ public class SchematicPrinter {
             }
         }
         return false;
+    }
+
+    // DUMP — deposit mined items into a dump chest when inventory is full
+
+    /*? if >=26.1 {*//*
+    private void startDumpRun(Minecraft mc) {
+    *//*?} else {*/
+    private void startDumpRun(MinecraftClient mc) {
+    /*?}*/
+        /*? if >=26.1 {*//*
+        BlockPos playerPos = mc.player.blockPosition();
+        *//*?} else {*/
+        BlockPos playerPos = mc.player.getBlockPos();
+        /*?}*/
+        BlockPos nearest = MoarMod.getChestManager().findNearestDumpChest(playerPos);
+        if (nearest == null) {
+            // No reachable dump chests — continue clearing
+            return;
+        }
+        dumpTarget = nearest;
+        /*? if >=26.1 {*//*
+        preDumpClearPos = playerPos.immutable();
+        *//*?} else {*/
+        preDumpClearPos = playerPos.toImmutable();
+        /*?}*/
+        dumpWaitTicks = 0;
+        dumpSyncDelay = 0;
+
+        double dy = Math.abs(nearest.getY() - playerPos.getY());
+        double dist = Math.sqrt(
+                /*? if >=26.1 {*//*
+                playerPos.distSqr(nearest));
+                *//*?} else {*/
+                playerPos.getSquaredDistance(nearest));
+                /*?}*/
+        if (dy > 8) {
+            walkToZoneWithPlacement(mc.player, nearest, 2);
+        } else if (dist > 48) {
+            List<BlockPos> legs = computeLinearWaypoints(playerPos, nearest, 48);
+            PathWalker.walkToViaWaypoints(legs, 2);
+        } else {
+            PathWalker.walkToNearby(nearest, 2);
+        }
+        autoState = AutoState.WALKING_TO_DUMP;
+
+        if (statusMessages) {
+            ChatHelper.info("§7Inventory nearly full — dumping items at §e"
+                    + nearest.getX() + " " + nearest.getY() + " " + nearest.getZ());
+        }
     }
 
     /*? if >=26.1 {*//*
@@ -4193,31 +4823,9 @@ public class SchematicPrinter {
     }
 
     /**
-     * Computes intermediate waypoints between the player and a supply
-     * chest using known positions from the PrinterDatabase.
-     *
-     * The database already tracks two classes of known-reachable
-     * positions:
- *
-     *     - Other supply chests — ground-level, previously
-     *       accessible container positions.  Excellent stepping stones
-     *       because they're typically in walkable areas.
-     *     - Scaffold blocks — Baritone-placed blocks that form
-     *       pillars or bridges between the build site and ground level.
-     *       These trace the path Baritone used to reach elevated areas.
- *
-     *
-     * All database positions are pooled as candidates, then a greedy
-     * nearest-neighbour chain is built from the player toward the target
-     * chest.  Each hop advances toward the destination, and only
-     * candidates that make meaningful forward progress are selected.
-     *
-     * The last entry is always the chest position itself.
-     *
-     * @param from  player's current position
-     * @param to    supply chest position
-     * @return ordered list of waypoints (may be just [to] if
-     *         no useful intermediates were found)
+     * Builds greedy nearest-neighbour waypoints from player to supply
+     * chest using known database positions (other chests + scaffold).
+     * Last entry is always the chest itself.
      */
     private List<BlockPos> computeSupplyWaypoints(BlockPos from, BlockPos to) {
         // 1. Collect all known positions from the database
@@ -4327,18 +4935,7 @@ public class SchematicPrinter {
         return waypoints;
     }
 
-    /**
-     * Generates straight-line intermediate waypoints between two
-     * positions at a fixed interval.  Used as a brute-force fallback
-     * when database waypoints aren't available — breaks a long journey
-     * into legs that Baritone can pathfind (typically 100-200 blocks).
-     *
-     * @param from      starting position (player)
-     * @param to        destination (supply chest)
-     * @param legLength distance between waypoints in blocks
-     * @return list of waypoints ending at to; single-element
-     *         list if the distance is already short enough
-     */
+    /** Splits a long path into fixed-length legs for Baritone. */
     private List<BlockPos> computeLinearWaypoints(BlockPos from, BlockPos to, int legLength) {
         List<BlockPos> waypoints = new ArrayList<>();
         double dx = to.getX() - from.getX();
@@ -4373,28 +4970,9 @@ public class SchematicPrinter {
     }
 
     /**
-     * Navigate to a build zone with placement enabled, breaking the
-     * journey into waypoint legs if the distance or elevation change
-     * is too large for a single Baritone A* search.
-     *
-     * This is the "Baritone extender".  For vertical-dominant paths
-     * (e.g. player at Y=-57, target at Y=-25) it uses a two-phase
-     * approach instead of 3D interpolation (which produces mid-air
-     * waypoints that Baritone can't reach):
-     * 
-     *     - Horizontal phase — walk along the ground to the XZ
-     *       column directly below/above the target.
-     *     - Vertical phase — pillar up or descend in 8-block
-     *       steps, each directly above/below the last.  Baritone only
-     *       needs to pillar/drop a few blocks per leg.
-     * 
-     *
-     * For horizontal-dominant paths the simpler linear-interpolation
-     * approach is used, since waypoints stay near ground level.
-     *
-     * @param player   the client player
-     * @param target   the build zone to reach
-     * @param radius   GoalNear radius for each leg and the final goal
+     * Walks to a build zone with placement enabled.  For vertical paths,
+     * uses horizontal-then-vertical phasing.  For horizontal, uses
+     * linear interpolation legs.
      */
     /*? if >=26.1 {*//*
     private void walkToZoneWithPlacement(LocalPlayer player,
@@ -4717,15 +5295,7 @@ public class SchematicPrinter {
         /*?}*/
     }
 
-    /**
-     * Scans a cube around center for a chest, barrel, or shulker box.
-     * Used as a fallback when the exact supply position is stale.
-     *
-     * @param world  the client world
-     * @param center the expected position
-     * @param radius search radius in blocks
-     * @return the nearest container position, or null
-     */
+    /** Finds nearby chest/barrel/shulker as fallback when exact pos is stale. */
     /*? if >=26.1 {*//*
     private BlockPos findNearbyChest(Level world, BlockPos center, int radius) {
     *//*?} else {*/
@@ -4928,10 +5498,14 @@ public class SchematicPrinter {
         /*?}*/
         BlockPos best = null;
         double bestDist = Double.MAX_VALUE;
+        /*? if >=26.1 {*//*
+        BlockPos.MutableBlockPos mutablePos = new BlockPos.MutableBlockPos();
+        *//*?} else {*/
+        BlockPos.Mutable mutablePos = new BlockPos.Mutable();
+        /*?}*/
 
-        // Scan all Y-levels; prefer the lowest unbuilt layer but don't
-        // break early — if the lowest layer is all in failedZones, naturally
-        // progress to higher layers.
+        // Scan all Y-levels; prefer lowest unbuilt layer, progressing
+        // to higher layers when lower ones are all in failedZones.
         for (LitematicaSchematic.Region region : schematic.getRegions()) {
             for (int y = 0; y < region.absY; y++) {
                 for (int z = 0; z < region.absZ; z++) {
@@ -4960,9 +5534,9 @@ public class SchematicPrinter {
                         if (!world.isChunkLoaded(wx >> 4, wz >> 4)) continue;
                         /*?}*/
 
-                        BlockPos worldPos = new BlockPos(wx, wy, wz);
+                        mutablePos.set(wx, wy, wz);
 
-                        if (isEffectivelyPlaced(world.getBlockState(worldPos), target)) continue;
+                        if (isEffectivelyPlaced(world.getBlockState(mutablePos), target)) continue;
 
                         // Prefer blocks at the lowest or highest unbuilt Y-level
                         if (sortMode == SortMode.TOP_DOWN) {
@@ -4971,26 +5545,22 @@ public class SchematicPrinter {
                             if (best != null && wy > best.getY()) continue;
                         }
 
-                        // Only consider blocks that can actually be placed
-                        // (have adjacent solid support), unless printInAir is on
-                        if (!printInAir && !PlacementEngine.hasAdjacentSolid(world, worldPos)) continue;
-
-                        // Skip blocks whose placement dependencies aren't met
-                        // (e.g. a torch with no wall, a flower with no floor).
-                        // Avoids walking to zones where nothing can be placed.
-                        if (!BlockDependency.isReadyToPlace(world, worldPos, target)) continue;
-
-                        // Skip zones we already failed to build from
-                        if (isNearFailedZone(worldPos)) continue;
+                        if (!printInAir && !PlacementEngine.hasAdjacentSolid(world, mutablePos)) continue;
+                        if (!BlockDependency.isReadyToPlace(world, mutablePos, target)) continue;
+                        if (isNearFailedZone(mutablePos)) continue;
 
                         /*? if >=26.1 {*//*
-                        double dist = playerPos.distanceToSqr(Vec3.atCenterOf(worldPos));
+                        double dist = playerPos.distanceToSqr(wx + 0.5, wy + 0.5, wz + 0.5);
                         *//*?} else {*/
-                        double dist = playerPos.squaredDistanceTo(Vec3d.ofCenter(worldPos));
+                        double dist = playerPos.squaredDistanceTo(wx + 0.5, wy + 0.5, wz + 0.5);
                         /*?}*/
                         if (dist < bestDist) {
                             bestDist = dist;
-                            best = worldPos;
+                            /*? if >=26.1 {*//*
+                            best = mutablePos.immutable();
+                            *//*?} else {*/
+                            best = mutablePos.toImmutable();
+                            /*?}*/
                         }
                     }
                 }
@@ -5000,17 +5570,8 @@ public class SchematicPrinter {
     }
 
     /**
-     * Scans the schematic for unbuilt non-air blocks in unloaded
-     * chunks.  Returns the nearest such position so the player can walk
-     * toward it, causing the chunk to load and enabling placement.
-     *
-     * This is the key to supporting 500×500+ builds: once all loaded
-     * chunks are built, the player walks toward the closest unloaded
-     * part of the schematic and the cycle repeats.
-     *
-     * We cannot verify world state for unloaded chunks, so we
-     * conservatively assume any non-air schematic block in an unloaded
-     * chunk still needs to be placed.
+     * Finds the nearest non-air schematic block in unloaded chunks.
+     * Walking toward the result loads the chunk for placement.
      */
     /*? if >=26.1 {*//*
     private BlockPos findUnloadedBuildZone(LocalPlayer player, Level world) {
@@ -5069,10 +5630,7 @@ public class SchematicPrinter {
 
     // PLACEMENT HELPERS
 
-    /**
-     * Formats a Set<Item> into a readable chat string, showing
-     * up to 5 item names with an overflow count.
-     */
+    /** Formats items as a chat string (up to 5 names + overflow). */
     private static String formatMissingItems(Set<Item> items) {
         if (items == null || items.isEmpty()) return "§7(none)";
         StringBuilder sb = new StringBuilder();
@@ -5093,11 +5651,7 @@ public class SchematicPrinter {
         return sb.toString();
     }
 
-    /**
-     * Formats a Set<String> of item IDs (e.g. "minecraft:stone")
-     * into a readable chat string, resolving each to its display name.
-     * Shows up to 5 items with an overflow count.
-     */
+    /** Formats item IDs as a chat string, resolving display names. */
     private static String formatNeededItemIds(Set<String> itemIds) {
         if (itemIds == null || itemIds.isEmpty()) return "§7(none)";
         StringBuilder sb = new StringBuilder();
@@ -5130,11 +5684,7 @@ public class SchematicPrinter {
         return shown == 0 ? "§7(unknown items)" : sb.toString();
     }
 
-    /**
-     * Converts the string item IDs in neededItems to Item
-     * objects and adds them to skippedItems, so the block-skip
-     * filter in tryPlaceNextBlock will avoid them.
-     */
+    /** Adds neededItems IDs to skippedItems so tryPlaceNextBlock skips them. */
     private void addNeededToSkipped() {
         for (String id : neededItems) {
             /*? if >=26.1 {*//*
@@ -5154,11 +5704,7 @@ public class SchematicPrinter {
         }
     }
 
-    /**
-     * Counts the number of schematic blocks that have not been placed and
-     * whose required item is in skippedItems.  Used to report how
-     * many blocks were left unplaced due to missing materials.
-     */
+    /** Counts unplaced schematic blocks whose item is in skippedItems. */
     /*? if >=26.1 {*//*
     private int countSkippedBlocks(Level world) {
     *//*?} else {*/
@@ -5284,12 +5830,7 @@ public class SchematicPrinter {
         return false;
     }
 
-    /**
-     * Returns true if there are solid (non-liquid) blocks in the
-     * schematic that have not yet been placed in the world.  Used to verify
-     * that all solids are genuinely done before transitioning to the liquid
-     * placement pass.
-     */
+    /** True if unplaced solid blocks remain in the schematic (TTL-cached). */
     /*? if >=26.1 {*//*
     private boolean hasRemainingSolids(Level world) {
     *//*?} else {*/
@@ -5354,14 +5895,8 @@ public class SchematicPrinter {
     }
 
     /**
-     * Returns true if this block state is an auto-created part that
-     * should NOT be individually placed.  These blocks are created by
-     * Minecraft automatically when the primary part is placed.
- *
-     *     - Door upper half — created when placing lower half
-     *     - Bed head — created when placing foot
-     *     - Tall plant upper — created when placing lower half
- *
+     * Auto-created block parts that should NOT be individually placed
+     * (door upper, bed head, tall plant upper).
      */
     private static boolean isAutoCreatedPart(BlockState state) {
         Block block = state.getBlock();
@@ -5412,25 +5947,9 @@ public class SchematicPrinter {
     }
 
     /**
-     * Returns true if the existing block state is "effectively placed"
-     * relative to the desired state.  This ignores neighbor-computed dynamic
-     * properties that the player cannot control during placement:
- *
-     *     - Stairs: STAIR_SHAPE (computed from adjacent stairs)
-     *     - Doors: OPEN, POWERED, DOOR_HINGE
-     *     - Fences: connection booleans (N/S/E/W)
-     *     - Walls: connection heights + UP
-     *     - Chests: CHEST_TYPE (single ↔ double)
-     *     - Panes (glass panes, iron bars): connections are neighbor-computed
-     *     - Fence gates: OPEN, POWERED, IN_WALL are dynamic; FACING matters
-     *     - Redstone wire: connections + power level
-     *     - Mushroom blocks: face booleans are neighbor-computed
-     *     - Vines: face booleans are neighbor-computed
-     *     - Chorus plant: connections are neighbor-computed
-     *     - Tripwire: ATTACHED, POWERED, DISARMED are dynamic
-     *     - Tall plants: any matching type is sufficient
-     *     - Snow: LAYERS is placement-specific
- *
+     * Checks if existing block matches desired, ignoring neighbor-computed
+     * dynamic properties (stair shape, fence connections, door open state,
+     * redstone power, etc.).
      */
     private static boolean isEffectivelyPlaced(BlockState existing, BlockState desired) {
         if (existing.equals(desired)) return true;
@@ -5663,20 +6182,8 @@ public class SchematicPrinter {
     }
 
     /**
-     * Finds a safe ground-level position near target where the
-     * player can stand and still be within placement reach.
-     *
-     * Checks in a spiral outward from the target, looking for a spot
-     * that has:
- *
-     *     - Solid (non-air, non-liquid) ground directly below
-     *     - Air (or replaceable) at feet and head level
-     *     - Not an unbuilt schematic block (so the player doesn't
-     *       stand inside blocks that need placing)
- *
-     *
-     * @return a suitable BlockPos for the player's feet, or
-     *         null if none was found
+     * Finds a safe standing position near target within placement reach.
+     * Needs solid ground, clear head room, and outside the build footprint.
      */
     /*? if >=26.1 {*//*
     private BlockPos findStandingPosition(BlockPos target, Level world, LocalPlayer player) {
@@ -5831,16 +6338,8 @@ public class SchematicPrinter {
     }
 
     /**
-     * Simple ground-connectivity check: walks a straight-line path from
-     * from to to at the same Y level (or to.getY())
-     * and checks that every intermediate block has solid ground beneath it.
-     *
-     * This is NOT full pathfinding — it just detects obvious air gaps
-     * (chasms, 1-block holes) between two positions.  If the positions
-     * are on different Y levels, the check uses the destination Y since
-     * that's where the player would need to stand.
-     *
-     * @return true if every step along the path has solid ground
+     * Simple ground check: walks a straight line from start to end
+     * at destination Y, verifying solid ground at each step.
      */
     /*? if >=26.1 {*//*
     private static boolean hasGroundPath(BlockPos from, BlockPos to, Level world) {
@@ -6123,17 +6622,8 @@ public class SchematicPrinter {
     }
 
     /**
-     * Finds an open, reachable position that the player can navigate to
-     * in order to escape an enclosed area.  Searches outward in a
-     * horizontal ring up to 8 blocks away, looking for a position with
-     * solid ground, passable feet/head, and not inside the schematic's
-     * unbuilt footprint.
-     *
-     * Unlike findStandingPosition, this accepts positions in
-     * or near water — the goal is escaping solid entrapment, and
-     * swimming through water is acceptable.
-     *
-     * @return a safe feet-level BlockPos, or null
+     * Finds an escape position outside an enclosed area.  Searches outward
+     * up to 8 blocks, accepting water positions unlike findStandingPosition.
      */
     /*? if >=26.1 {*//*
     private BlockPos findEscapePosition(LocalPlayer player,
@@ -6246,6 +6736,11 @@ public class SchematicPrinter {
         *//*?} else {*/
         BlockPos playerPos = player.getBlockPos();
         /*?}*/
+        /*? if >=26.1 {*//*
+        Vec3 eyePos = player.getEyePosition();
+        *//*?} else {*/
+        Vec3d eyePos = player.getEyePos();
+        /*?}*/
 
         // Debug counters: track why blocks are filtered
         int dbgTotal = 0, dbgRange = 0, dbgOverlap = 0, dbgBounds = 0;
@@ -6264,9 +6759,9 @@ public class SchematicPrinter {
                     /*?}*/
 
                     /*? if >=26.1 {*//*
-                    if (player.getEyePosition().distanceToSqr(Vec3.atCenterOf(worldPos)) > rangeSq) continue;
+                    if (eyePos.distanceToSqr(Vec3.atCenterOf(worldPos)) > rangeSq) continue;
                     *//*?} else {*/
-                    if (player.getEyePos().squaredDistanceTo(Vec3d.ofCenter(worldPos)) > rangeSq) continue;
+                    if (eyePos.squaredDistanceTo(Vec3d.ofCenter(worldPos)) > rangeSq) continue;
                     /*?}*/
                     // Skip blocks the player is physically standing inside
                     // (placing there would push them out).  Player hitbox is
@@ -6372,9 +6867,9 @@ public class SchematicPrinter {
                     })
                 .thenComparingInt(BlockPos::getY)
                 /*? if >=26.1 {*//*
-                .thenComparingDouble(p -> player.getEyePosition().distanceToSqr(Vec3.atCenterOf(p)));
+                .thenComparingDouble(p -> eyePos.distanceToSqr(Vec3.atCenterOf(p)));
                 *//*?} else {*/
-                .thenComparingDouble(p -> player.getEyePos().squaredDistanceTo(Vec3d.ofCenter(p)));
+                .thenComparingDouble(p -> eyePos.squaredDistanceTo(Vec3d.ofCenter(p)));
                 /*?}*/
         } else if (sortMode == SortMode.TOP_DOWN) {
             comparator = Comparator.<BlockPos>comparingInt((BlockPos p) -> {
@@ -6385,9 +6880,9 @@ public class SchematicPrinter {
                     })
                 .thenComparingInt(p -> -p.getY())
                 /*? if >=26.1 {*//*
-                .thenComparingDouble(p -> player.getEyePosition().distanceToSqr(Vec3.atCenterOf(p)));
+                .thenComparingDouble(p -> eyePos.distanceToSqr(Vec3.atCenterOf(p)));
                 *//*?} else {*/
-                .thenComparingDouble(p -> player.getEyePos().squaredDistanceTo(Vec3d.ofCenter(p)));
+                .thenComparingDouble(p -> eyePos.squaredDistanceTo(Vec3d.ofCenter(p)));
                 /*?}*/
         } else {
             comparator = Comparator.<BlockPos>comparingInt((BlockPos p) -> {
@@ -6397,9 +6892,9 @@ public class SchematicPrinter {
                         return BlockDependency.getTier(schematic.getBlockState(sx2, sy2, sz2));
                     })
                 /*? if >=26.1 {*//*
-                .thenComparingDouble(p -> player.getEyePosition().distanceToSqr(Vec3.atCenterOf(p)));
+                .thenComparingDouble(p -> eyePos.distanceToSqr(Vec3.atCenterOf(p)));
                 *//*?} else {*/
-                .thenComparingDouble(p -> player.getEyePos().squaredDistanceTo(Vec3d.ofCenter(p)));
+                .thenComparingDouble(p -> eyePos.squaredDistanceTo(Vec3d.ofCenter(p)));
                 /*?}*/
         }
         candidates.sort(comparator);

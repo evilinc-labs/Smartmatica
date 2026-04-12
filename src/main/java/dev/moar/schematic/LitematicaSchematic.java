@@ -86,7 +86,7 @@ public final class LitematicaSchematic {
     // Offset subtracted during normalization. Add to anchor for correct lookups.
     private final int originOffsetX, originOffsetY, originOffsetZ;
 
-    // ── public API ──────────────────────────────────────────────────────
+    // public API
 
     // Load and normalize region origins to (0,0,0).
     // Max decompressed NBT size (zip-bomb guard).
@@ -99,14 +99,14 @@ public final class LitematicaSchematic {
         NbtCompound root = NbtIo.readCompressed(path, NbtSizeTracker.of(MAX_NBT_BYTES));
         /*?}*/
 
-        // ── schema & data version ───────────────────────────────────────
+        // schema & data version
         int schemaVersion = NbtCompat.getInt(root, "Version", -1);
 
         if (schemaVersion != -1 && (schemaVersion < 4 || schemaVersion > 7)) {
             LOGGER.warn("Litematic schema version {} may not be fully supported (expected 5-7)", schemaVersion);
         }
 
-        // ── metadata ────────────────────────────────────────────────────
+        // metadata
         /*? if >=26.1 {*//*
         CompoundTag meta = NbtCompat.getCompound(root, "Metadata");
         *//*?} else {*/
@@ -123,7 +123,7 @@ public final class LitematicaSchematic {
                     + "Some blocks may not be recognized.", name, dataVersion, currentDataVersion);
         }
 
-        // ── regions ─────────────────────────────────────────────────────
+        // regions
         /*? if >=26.1 {*//*
         CompoundTag regionsNbt = NbtCompat.getCompound(root, "Regions");
         *//*?} else {*/
@@ -226,7 +226,7 @@ public final class LitematicaSchematic {
         return false;
     }
 
-    // ── getters ─────────────────────────────────────────────────────────
+    // getters
 
     public String getName()            { return name; }
     public String getAuthor()          { return author; }
@@ -255,7 +255,7 @@ public final class LitematicaSchematic {
     public int getOriginOffsetY() { return originOffsetY; }
     public int getOriginOffsetZ() { return originOffsetZ; }
 
-    // ── private ctor ────────────────────────────────────────────────────
+    // private ctor
 
     private LitematicaSchematic(String name, String author, int sizeX, int sizeY, int sizeZ,
                                 int totalNonAir, List<Region> regions,
@@ -277,9 +277,7 @@ public final class LitematicaSchematic {
         this.originOffsetZ = originOffsetZ;
     }
 
-    // ═══════════════════════════════════════════════════════════════════
-    //  Region
-    // ═══════════════════════════════════════════════════════════════════
+    // --- Region
 
     /**
      * One named region inside the schematic.  Stores the palette and the
@@ -403,9 +401,7 @@ public final class LitematicaSchematic {
         }
     }
 
-    // ═══════════════════════════════════════════════════════════════════
-    //  Block-state NBT → BlockState
-    // ═══════════════════════════════════════════════════════════════════
+    // --- Block-state NBT → BlockState
 
     private static final Set<String> AIR_IDS = Set.of(
             "minecraft:air", "minecraft:cave_air", "minecraft:void_air"

@@ -40,8 +40,7 @@ import java.util.HashMap;
 import java.util.Map;
 import java.util.Set;
 
-// Enriched item IDs for stash management. Pickaxes get enchant suffixes
-// (e.g. minecraft:diamond_pickaxe[silk_touch]). Other items use plain registry ID.
+// Enriched item IDs — pickaxes get enchant suffixes, others use registry ID.
 public final class ItemIdentifier {
 
     private ItemIdentifier() {}
@@ -55,7 +54,7 @@ public final class ItemIdentifier {
             "minecraft:netherite_pickaxe"
     );
 
-    // Enriched item ID — pickaxes with silk_touch/fortune get a bracket suffix.
+    // Item ID with pickaxe enchant suffix (e.g. [silk_touch]).
     public static String getItemId(ItemStack stack) {
         /*? if >=26.1 {*//*
         String baseId = BuiltInRegistries.ITEM.getKey(stack.getItem()).toString();

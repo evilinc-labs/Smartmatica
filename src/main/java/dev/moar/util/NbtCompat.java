@@ -124,7 +124,7 @@ public final class NbtCompat {
         /*?}*/
     }
 
-    // ── game version helpers ────────────────────────────────────────────
+    // game version helpers
 
     /** Returns the data version (save version ID) of the current Minecraft build. */
     public static int currentDataVersion() {

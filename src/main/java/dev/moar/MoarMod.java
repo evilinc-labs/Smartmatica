@@ -4,12 +4,16 @@ import dev.moar.chest.ChestManager;
 import dev.moar.command.PrinterCommand;
 import dev.moar.command.SpawnProofCommand;
 import dev.moar.command.StashCommand;
+import dev.moar.stash.StashDatabase;
 import dev.moar.stash.StashManager;
 import dev.moar.printer.SchematicPrinter;
 import dev.moar.schematic.PrinterResourceManager;
 import dev.moar.spawnproof.SpawnProofer;
+import dev.moar.util.PathWalker;
+import dev.moar.util.PrinterDatabase;
 import net.fabricmc.api.ClientModInitializer;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
+import net.fabricmc.fabric.api.client.networking.v1.ClientPlayConnectionEvents;
 /*? if >=26.1 {*//*
 import net.fabricmc.fabric.api.client.keymapping.v1.KeyMappingHelper;
 *//*?} else {*/
@@ -43,6 +47,7 @@ public class MoarMod implements ClientModInitializer {
     public static final String MOD_ID = "moar";
     public static final Logger LOGGER = LoggerFactory.getLogger("MOAR");
 
+    private static final StashDatabase DATABASE = new StashDatabase();
     private static final SchematicPrinter PRINTER = new SchematicPrinter();
     private static final SpawnProofer SPAWN_PROOFER = new SpawnProofer();
     private static final ChestManager CHEST_MANAGER = new ChestManager();
@@ -112,6 +117,17 @@ public class MoarMod implements ClientModInitializer {
             STASH_MANAGER.tick();
         });
 
+        // Clean up all state when leaving a server/world
+        ClientPlayConnectionEvents.DISCONNECT.register((handler, client) -> {
+            PRINTER.onDisconnect();
+            STASH_MANAGER.stop();
+            STASH_MANAGER.getOrganizer().stop();
+            SPAWN_PROOFER.stop();
+            PathWalker.stop();
+            PrinterDatabase.clearScaffold();
+            DATABASE.close();
+        });
+
         LOGGER.info("MOAR initialized.");
     }
 
@@ -133,5 +149,10 @@ public class MoarMod implements ClientModInitializer {
     /** Get the singleton stash manager instance. */
     public static StashManager getStashManager() {
         return STASH_MANAGER;
+    }
+
+    /** Get the shared SQLite database. */
+    public static StashDatabase getDatabase() {
+        return DATABASE;
     }
 }

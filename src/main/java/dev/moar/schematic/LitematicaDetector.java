@@ -87,7 +87,7 @@ public final class LitematicaDetector {
         return all.isEmpty() ? null : all.get(0);
     }
 
-    // ── internals ───────────────────────────────────────────────────────
+    // internals
 
     // Read placements from Litematica memory via reflection.
     private static List<DetectedPlacement> detectFromMemory() {
@@ -207,22 +207,12 @@ public final class LitematicaDetector {
         return results;
     }
 
-    // ── SchematicWorld anchor correlation ───────────────────────────────
+    // SchematicWorld anchor correlation
 
     /**
-     * Detect the correct anchor by reading blocks directly from
-     * Litematica's in-memory SchematicWorld.  This is the
-     * "hologram world" — all blocks that the user sees rendered as
-     * transparent overlays exist at their exact world positions in this
-     * synthetic world.
-     *
-     * The method scans blocks near the player in the SchematicWorld,
-     * finds non-air ones, and correlates them against the loaded
-     * schematic to compute the anchor offset.  This does not depend on
-     * Litematica's placement origin logic at all.
-     *
-     * @param schematic the loaded schematic to correlate against
-     * @return the computed anchor, or null if detection failed
+     * Detect anchor by reading blocks from Litematica's SchematicWorld.
+     * Scans near the player, correlates against the schematic to compute
+     * the anchor offset. Returns null if detection fails.
      */
     public static BlockPos detectAnchorFromSchematicWorld(LitematicaSchematic schematic) {
         if (schematic == null) return null;

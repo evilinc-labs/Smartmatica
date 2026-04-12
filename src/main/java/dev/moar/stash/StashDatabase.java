@@ -16,8 +16,7 @@ import java.nio.file.Path;
 import java.sql.*;
 import java.util.*;
 
-// SQLite storage for stash scan results (config/moar/stash.db).
-// Tables: containers, items, shulkers, shulker_items.
+// SQLite storage for all mod data (config/moar/stash.db).
 public final class StashDatabase {
 
     private static final Logger LOGGER = LoggerFactory.getLogger("MOAR/StashDB");
@@ -29,10 +28,11 @@ public final class StashDatabase {
 
     private Connection connection;
 
-    // ── Lifecycle ───────────────────────────────────────────────────────
+    // Lifecycle
 
     /** Open (or create) the database and ensure tables exist. */
     public void open() {
+        close(); // release any existing connection first
         try {
             // Load SQLite JDBC (Fabric classloader not visible to DriverManager)
             Class.forName("org.sqlite.JDBC");
@@ -67,7 +67,7 @@ public final class StashDatabase {
         }
     }
 
-    // ── Schema ──────────────────────────────────────────────────────────
+    // Schema
 
     private void createTables() throws SQLException {
         try (Statement stmt = connection.createStatement()) {
@@ -138,6 +138,74 @@ public final class StashDatabase {
                     created_at INTEGER NOT NULL
                 )
                 """);
+
+            // Printer / ChestManager tables
+
+            stmt.executeUpdate("""
+                CREATE TABLE IF NOT EXISTS supply_chests (
+                    x INTEGER NOT NULL,
+                    y INTEGER NOT NULL,
+                    z INTEGER NOT NULL,
+                    PRIMARY KEY (x, y, z)
+                )
+                """);
+
+            stmt.executeUpdate("""
+                CREATE TABLE IF NOT EXISTS dump_chests (
+                    x INTEGER NOT NULL,
+                    y INTEGER NOT NULL,
+                    z INTEGER NOT NULL,
+                    PRIMARY KEY (x, y, z)
+                )
+                """);
+
+            stmt.executeUpdate("""
+                CREATE TABLE IF NOT EXISTS scaffold (
+                    x       INTEGER NOT NULL,
+                    y       INTEGER NOT NULL,
+                    z       INTEGER NOT NULL,
+                    item_id TEXT    NOT NULL,
+                    PRIMARY KEY (x, y, z)
+                )
+                """);
+
+            // Sorting config tables
+
+            stmt.executeUpdate("""
+                CREATE TABLE IF NOT EXISTS storage_chests (
+                    x          INTEGER NOT NULL,
+                    y          INTEGER NOT NULL,
+                    z          INTEGER NOT NULL,
+                    sort_order INTEGER NOT NULL,
+                    item_type  TEXT    DEFAULT NULL,
+                    is_overflow INTEGER NOT NULL DEFAULT 0,
+                    PRIMARY KEY (x, y, z)
+                )
+                """);
+
+            stmt.executeUpdate("""
+                CREATE TABLE IF NOT EXISTS keep_items (
+                    item_id TEXT PRIMARY KEY
+                )
+                """);
+
+            // SpawnProofer tables
+
+            stmt.executeUpdate("""
+                CREATE TABLE IF NOT EXISTS spawnproofer_supply (
+                    x INTEGER NOT NULL,
+                    y INTEGER NOT NULL,
+                    z INTEGER NOT NULL,
+                    PRIMARY KEY (x, y, z)
+                )
+                """);
+
+            stmt.executeUpdate("""
+                CREATE TABLE IF NOT EXISTS config (
+                    key   TEXT PRIMARY KEY,
+                    value TEXT NOT NULL
+                )
+                """);
         }
         connection.commit();
     }
@@ -151,7 +219,7 @@ public final class StashDatabase {
         }
     }
 
-    // ── Region operations ────────────────────────────────────────────────
+    // Region operations
 
     /** Save a named region (upsert). */
     public void saveRegion(String name, BlockPos corner1, BlockPos corner2) {
@@ -241,7 +309,7 @@ public final class StashDatabase {
         }
     }
 
-    // ── Label operations ────────────────────────────────────────────────
+    // Label operations
 
     /** Set the label for a container at the given position. */
     public void updateLabel(BlockPos pos, String label) {
@@ -314,7 +382,7 @@ public final class StashDatabase {
         return result;
     }
 
-    // ── Write operations ────────────────────────────────────────────────
+    // Write operations
 
     /**
      * Save a single container entry (upsert). Replaces any existing data
@@ -454,7 +522,7 @@ public final class StashDatabase {
         }
     }
 
-    /** Wipe all data from the database. */
+    /** Wipe stash container data from the database. */
     public void wipeAll() {
         if (!isOpen()) return;
         try (Statement stmt = connection.createStatement()) {
@@ -470,7 +538,256 @@ public final class StashDatabase {
         }
     }
 
-    // ── Read operations ─────────────────────────────────────────────────
+    // ── Position-set tables (supply_chests, dump_chests, spawnproofer_supply) ──
+
+    /** Save a set of BlockPos to a named table (replaces all rows). */
+    private void savePositionSet(String table, Collection<BlockPos> positions) {
+        if (!isOpen()) return;
+        try (Statement del = connection.createStatement()) {
+            del.executeUpdate("DELETE FROM " + table);
+            try (PreparedStatement ps = connection.prepareStatement(
+                    "INSERT INTO " + table + " (x, y, z) VALUES (?,?,?)")) {
+                for (BlockPos pos : positions) {
+                    ps.setInt(1, pos.getX());
+                    ps.setInt(2, pos.getY());
+                    ps.setInt(3, pos.getZ());
+                    ps.addBatch();
+                }
+                ps.executeBatch();
+            }
+            connection.commit();
+        } catch (SQLException e) {
+            LOGGER.error("Failed to save {} positions to {}", positions.size(), table, e);
+            rollback();
+        }
+    }
+
+    /** Load all BlockPos from a named table (insertion order preserved). */
+    private List<BlockPos> loadPositionSet(String table) {
+        List<BlockPos> result = new ArrayList<>();
+        if (!isOpen()) return result;
+        try (Statement stmt = connection.createStatement();
+             ResultSet rs = stmt.executeQuery("SELECT x, y, z FROM " + table)) {
+            while (rs.next()) {
+                result.add(new BlockPos(rs.getInt("x"), rs.getInt("y"), rs.getInt("z")));
+            }
+        } catch (SQLException e) {
+            LOGGER.error("Failed to load positions from {}", table, e);
+        }
+        return result;
+    }
+
+    public void saveSupplyChests(Collection<BlockPos> positions) {
+        savePositionSet("supply_chests", positions);
+    }
+
+    public List<BlockPos> loadSupplyChests() {
+        return loadPositionSet("supply_chests");
+    }
+
+    public void saveDumpChests(Collection<BlockPos> positions) {
+        savePositionSet("dump_chests", positions);
+    }
+
+    public List<BlockPos> loadDumpChests() {
+        return loadPositionSet("dump_chests");
+    }
+
+    public void saveSpawnprooferSupply(Collection<BlockPos> positions) {
+        savePositionSet("spawnproofer_supply", positions);
+    }
+
+    public List<BlockPos> loadSpawnprooferSupply() {
+        return loadPositionSet("spawnproofer_supply");
+    }
+
+    // Scaffold table
+
+    /** Replace all scaffold entries. */
+    public void saveScaffold(Map<BlockPos, String> scaffoldMap) {
+        if (!isOpen()) return;
+        try (Statement del = connection.createStatement()) {
+            del.executeUpdate("DELETE FROM scaffold");
+            try (PreparedStatement ps = connection.prepareStatement(
+                    "INSERT INTO scaffold (x, y, z, item_id) VALUES (?,?,?,?)")) {
+                for (var entry : scaffoldMap.entrySet()) {
+                    ps.setInt(1, entry.getKey().getX());
+                    ps.setInt(2, entry.getKey().getY());
+                    ps.setInt(3, entry.getKey().getZ());
+                    ps.setString(4, entry.getValue());
+                    ps.addBatch();
+                }
+                ps.executeBatch();
+            }
+            connection.commit();
+        } catch (SQLException e) {
+            LOGGER.error("Failed to save scaffold data", e);
+            rollback();
+        }
+    }
+
+    /** Load all scaffold entries from the database. */
+    public Map<BlockPos, String> loadScaffold() {
+        Map<BlockPos, String> result = new LinkedHashMap<>();
+        if (!isOpen()) return result;
+        try (Statement stmt = connection.createStatement();
+             ResultSet rs = stmt.executeQuery("SELECT x, y, z, item_id FROM scaffold")) {
+            while (rs.next()) {
+                result.put(
+                        new BlockPos(rs.getInt("x"), rs.getInt("y"), rs.getInt("z")),
+                        rs.getString("item_id"));
+            }
+        } catch (SQLException e) {
+            LOGGER.error("Failed to load scaffold data", e);
+        }
+        return result;
+    }
+
+    // Config key-value table
+
+    /** Set a config value (upsert). */
+    public void setConfig(String key, String value) {
+        if (!isOpen()) return;
+        try (PreparedStatement ps = connection.prepareStatement(
+                "INSERT OR REPLACE INTO config (key, value) VALUES (?,?)")) {
+            ps.setString(1, key);
+            ps.setString(2, value);
+            ps.executeUpdate();
+            connection.commit();
+        } catch (SQLException e) {
+            LOGGER.error("Failed to set config '{}'", key, e);
+            rollback();
+        }
+    }
+
+    /** Get a config value, or null if not set. */
+    public String getConfig(String key) {
+        if (!isOpen()) return null;
+        try (PreparedStatement ps = connection.prepareStatement(
+                "SELECT value FROM config WHERE key=?")) {
+            ps.setString(1, key);
+            try (ResultSet rs = ps.executeQuery()) {
+                return rs.next() ? rs.getString("value") : null;
+            }
+        } catch (SQLException e) {
+            LOGGER.error("Failed to get config '{}'", key, e);
+            return null;
+        }
+    }
+
+    /** Delete a config key. */
+    public void deleteConfig(String key) {
+        if (!isOpen()) return;
+        try (PreparedStatement ps = connection.prepareStatement(
+                "DELETE FROM config WHERE key=?")) {
+            ps.setString(1, key);
+            ps.executeUpdate();
+            connection.commit();
+        } catch (SQLException e) {
+            LOGGER.error("Failed to delete config '{}'", key, e);
+            rollback();
+        }
+    }
+
+    // Storage chests (sorting config)
+
+    /**
+     * Save the full sorting configuration (storage chests, types, overflow).
+     * Replaces all rows in storage_chests.
+     */
+    public void saveStorageChests(List<BlockPos> chests,
+                                  Map<BlockPos, String> chestTypes,
+                                  BlockPos overflowChest) {
+        if (!isOpen()) return;
+        try (Statement del = connection.createStatement()) {
+            del.executeUpdate("DELETE FROM storage_chests");
+            try (PreparedStatement ps = connection.prepareStatement(
+                    "INSERT INTO storage_chests (x, y, z, sort_order, item_type, is_overflow) VALUES (?,?,?,?,?,?)")) {
+                int order = 0;
+                for (BlockPos pos : chests) {
+                    ps.setInt(1, pos.getX());
+                    ps.setInt(2, pos.getY());
+                    ps.setInt(3, pos.getZ());
+                    ps.setInt(4, order++);
+                    ps.setString(5, chestTypes.get(pos)); // may be null
+                    ps.setInt(6, pos.equals(overflowChest) ? 1 : 0);
+                    ps.addBatch();
+                }
+                ps.executeBatch();
+            }
+            connection.commit();
+        } catch (SQLException e) {
+            LOGGER.error("Failed to save storage chest config", e);
+            rollback();
+        }
+    }
+
+    /** Result of loading storage chest config. */
+    public record StorageChestConfig(
+            List<BlockPos> chests,
+            Map<BlockPos, String> chestTypes,
+            BlockPos overflowChest) {}
+
+    /** Load sorting configuration from the database. */
+    public StorageChestConfig loadStorageChests() {
+        List<BlockPos> chests = new ArrayList<>();
+        Map<BlockPos, String> types = new LinkedHashMap<>();
+        BlockPos overflow = null;
+        if (!isOpen()) return new StorageChestConfig(chests, types, overflow);
+        try (Statement stmt = connection.createStatement();
+             ResultSet rs = stmt.executeQuery(
+                     "SELECT x, y, z, item_type, is_overflow FROM storage_chests ORDER BY sort_order")) {
+            while (rs.next()) {
+                BlockPos pos = new BlockPos(rs.getInt("x"), rs.getInt("y"), rs.getInt("z"));
+                chests.add(pos);
+                String itemType = rs.getString("item_type");
+                if (itemType != null) types.put(pos, itemType);
+                if (rs.getInt("is_overflow") == 1) overflow = pos;
+            }
+        } catch (SQLException e) {
+            LOGGER.error("Failed to load storage chest config", e);
+        }
+        return new StorageChestConfig(chests, types, overflow);
+    }
+
+    // Keep items
+
+    /** Save the keep-items set (replaces all rows). */
+    public void saveKeepItems(Collection<String> itemIds) {
+        if (!isOpen()) return;
+        try (Statement del = connection.createStatement()) {
+            del.executeUpdate("DELETE FROM keep_items");
+            try (PreparedStatement ps = connection.prepareStatement(
+                    "INSERT INTO keep_items (item_id) VALUES (?)")) {
+                for (String id : itemIds) {
+                    ps.setString(1, id);
+                    ps.addBatch();
+                }
+                ps.executeBatch();
+            }
+            connection.commit();
+        } catch (SQLException e) {
+            LOGGER.error("Failed to save keep items", e);
+            rollback();
+        }
+    }
+
+    /** Load keep-item IDs from the database. */
+    public Set<String> loadKeepItems() {
+        Set<String> result = new LinkedHashSet<>();
+        if (!isOpen()) return result;
+        try (Statement stmt = connection.createStatement();
+             ResultSet rs = stmt.executeQuery("SELECT item_id FROM keep_items")) {
+            while (rs.next()) {
+                result.add(rs.getString("item_id"));
+            }
+        } catch (SQLException e) {
+            LOGGER.error("Failed to load keep items", e);
+        }
+        return result;
+    }
+
+    // Read operations
 
     /**
      * Load all container entries from the database into a map.
@@ -625,7 +942,7 @@ public final class StashDatabase {
         }
     }
 
-    // ── Helpers ──────────────────────────────────────────────────────────
+    // Helpers
 
     private void rollback() {
         try {

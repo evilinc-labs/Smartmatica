@@ -1,5 +1,6 @@
 package dev.moar.stash;
 
+import dev.moar.MoarMod;
 import dev.moar.chest.ChestManager;
 import dev.moar.util.ChatHelper;
 import dev.moar.util.PathWalker;
@@ -122,27 +123,27 @@ public final class StashManager {
 
     private static final Logger LOGGER = LoggerFactory.getLogger("MOAR/Stash");
 
-    // ── State machine ───────────────────────────────────────────────────
+    private final StashOrganizer organizer = new StashOrganizer();
+
+    { organizer.setStashManager(this); }
+
+    public StashOrganizer getOrganizer() { return organizer; }
+
+    // State machine
 
     public enum State {
         IDLE,
-        /** Scanning loaded chunks in the region for containers. */
         ZONE_SCANNING,
-        /** Walking to the next container. */
         WALKING,
-        /** Opening a container. */
         OPENING,
-        /** Reading the open container's contents. */
         READING,
-        /** Walking to the next unscanned zone (incremental). */
         WALKING_TO_ZONE,
-        /** All containers in the region have been scanned. */
         DONE
     }
 
     private State state = State.IDLE;
 
-    // ── Region corners ──────────────────────────────────────────────────
+    // Region corners
 
     /** User-set corner 1 of the stash region. */
     private BlockPos corner1;
@@ -154,7 +155,7 @@ public final class StashManager {
     /** Computed inclusive maximum corner of the region. */
     private BlockPos regionMax;
 
-    // ── Configuration ───────────────────────────────────────────────────
+    // Configuration
 
     /** Maximum number of containers to scan per session. */
     private static final int MAX_CONTAINERS = 2048;
@@ -168,7 +169,7 @@ public final class StashManager {
     /** Leg length for linear waypoint interpolation (blocks). */
     private static final int WAYPOINT_LEG_LENGTH = 48;
 
-    // ── Runtime state ───────────────────────────────────────────────────
+    // Runtime state
 
     /** Discovered container positions (sorted by distance). */
     private final Deque<BlockPos> scanQueue = new ArrayDeque<>();
@@ -203,11 +204,8 @@ public final class StashManager {
     /** Whether a render-distance warning was shown this session. */
     private boolean warnedRenderDistance;
 
-    // ── Data types ──────────────────────────────────────────────────────
+    // Data types
 
-    /**
-     * An entry in the stash index representing a single container.
-     */
     public record ContainerEntry(
             BlockPos pos,
             String blockType,
@@ -229,14 +227,14 @@ public final class StashManager {
             Map<String, Integer> contents
     ) {}
 
-    // ── Public API — corners ────────────────────────────────────────────
+    // Public API — corners
 
     public void setCorner1(BlockPos pos) { this.corner1 = pos; }
     public void setCorner2(BlockPos pos) { this.corner2 = pos; }
     public BlockPos getCorner1() { return corner1; }
     public BlockPos getCorner2() { return corner2; }
 
-    // ── Public API — state ──────────────────────────────────────────────
+    // Public API — state
 
     public State getState() { return state; }
 
@@ -251,7 +249,7 @@ public final class StashManager {
     public int getIndexedCount() { return index.size(); }
     public int getRemainingCount() { return scanQueue.size(); }
 
-    // ── Lifecycle ───────────────────────────────────────────────────────
+    // Lifecycle
 
     /**
      * Start scanning the region defined by corner1 and corner2.
@@ -317,6 +315,13 @@ public final class StashManager {
             warnedRenderDistance = true;
         }
 
+        // Open the database for this scan session
+        StashDatabase database = MoarMod.getDatabase();
+        if (!database.isOpen()) database.open();
+
+        // Save region corners to the database
+        database.saveRegion("stash", corner1, corner2);
+
         state = State.ZONE_SCANNING;
         return true;
     }
@@ -326,23 +331,50 @@ public final class StashManager {
         PathWalker.stop();
         state = State.IDLE;
         scanQueue.clear();
+        scannedChunks.clear();
+        visitedPositions.clear();
         currentTarget = null;
         ChatHelper.labelled("Stash", "§eScan stopped. "
                 + totalIndexed + " containers indexed so far.");
     }
 
-    /** Clear the index entirely. */
+    /** Clear the index entirely (memory + database). */
     public void clearIndex() {
         index.clear();
         totalIndexed = 0;
         totalSkipped = 0;
         totalFound = 0;
+        if (MoarMod.getDatabase().isOpen()) MoarMod.getDatabase().wipeAll();
         ChatHelper.labelled("Stash", "§eStash index cleared.");
     }
 
-    // ── Tick ────────────────────────────────────────────────────────────
+    /**
+     * Load persisted stash data from the database.
+     * Called once at mod initialization.
+     */
+    public void loadFromDatabase() {
+        StashDatabase database = MoarMod.getDatabase();
+        if (!database.isOpen()) return;
+        Map<BlockPos, ContainerEntry> saved = database.loadAll();
+        if (!saved.isEmpty()) {
+            index.putAll(saved);
+            totalIndexed = saved.size();
+            LOGGER.info("Loaded {} containers from stash database", saved.size());
+        }
+
+        // Restore saved region corners
+        BlockPos[] region = database.loadRegion("stash");
+        if (region != null) {
+            corner1 = region[0];
+            corner2 = region[1];
+            LOGGER.info("Restored stash region: {} to {}", corner1, corner2);
+        }
+    }
+
+    // Tick
 
     public void tick() {
+        organizer.tick();
         if (state == State.IDLE || state == State.DONE) return;
 
         /*? if >=26.1 {*//*
@@ -366,7 +398,7 @@ public final class StashManager {
         }
     }
 
-    // ── State handlers ──────────────────────────────────────────────────
+    // State handlers
 
     // Scan loaded chunks within the region for containers (skips already-scanned chunks).
     /*? if >=26.1 {*//*
@@ -698,6 +730,10 @@ public final class StashManager {
         index.put(currentTarget, entry);
         totalIndexed++;
 
+        // Persist to database
+        StashDatabase db = MoarMod.getDatabase();
+        if (db.isOpen()) db.saveContainer(entry);
+
         // Close the screen
         /*? if >=26.1 {*//*
         mc.player.clientSideCloseContainer();
@@ -744,7 +780,7 @@ public final class StashManager {
         PathWalker.tick();
     }
 
-    // ── Navigation ──────────────────────────────────────────────────────
+    // Navigation
 
     /** Advance to the next container, or to the next zone, or finish. */
     private void advanceToNext() {
@@ -876,7 +912,7 @@ public final class StashManager {
         ChatHelper.labelled("Stash", "§7Use §f/stash export§7 to save CSV report.");
     }
 
-    // ── Region helpers ──────────────────────────────────────────────────
+    // Region helpers
 
     /** Check if any chunks in the region are currently unloaded. */
     /*? if >=26.1 {*//*
@@ -942,7 +978,7 @@ public final class StashManager {
         return ((long) cx << 32) | (cz & 0xFFFFFFFFL);
     }
 
-    // ── CSV export ──────────────────────────────────────────────────────
+    // CSV export
 
     // Export the current stash index to a CSV file. Returns the path, or null on error.
     public Path exportCsv() {
@@ -1029,7 +1065,7 @@ public final class StashManager {
         }
     }
 
-    // ── Status ──────────────────────────────────────────────────────────
+    // Status
 
     public String getStatus() {
         return switch (state) {
@@ -1073,7 +1109,7 @@ public final class StashManager {
         return sizeX + "x" + sizeY + "x" + sizeZ + " blocks";
     }
 
-    // ── Utility ─────────────────────────────────────────────────────────
+    // Utility
 
     /** Check if a block is a container we should scan. */
     private static boolean isContainer(Block block) {

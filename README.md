@@ -1,147 +1,166 @@
-# Minecraft Orchestrated Automation & Response
+# MOAR — Minecraft Orchestrated Automation & Response
 
-A standalone Fabric client mod for automated block placement, spawn-proofing, and container indexing. Built for everyone.
+A client-side Fabric mod that automates schematic building, spawn-proofing, and container management. Load a `.litematic`, point it at some supply chests, and let it build.
 
-> **Early Version Advisory** — It works, but expect rough edges. File an issue for bugs or open a PR to improve things.
-
-## Featurets
+## What It Does
 
 ### Schematic Printer
-- **Manual mode** — toggle to place blocks from a loaded `.litematic` within reach
-- **AutoBuild mode** — fully automated building with zone-based progression
-- **Baritone pathfinding** — A\* navigation via [Baritone](https://github.com/cabaletta/baritone); falls back to a built-in vanilla walker when absent
-- **Supply chest restocking** — walks to configured chests to grab materials mid-build; indexes contents including shulker boxes
-- **Shulker box unloading** — places, opens, loots, and breaks shulkers from supply chests; builds and cleans up temporary platforms
-- **Scaffold cleanup** — tracks blocks placed by Baritone (bridges, pillars) and removes them after the build
-- **Self-correction** — detects misplaced/wrong blocks and breaks + replaces them
-- **Smart tool selection** — picks the fastest tool from inventory for breaking
-- **Block property handling** — stairs, slabs, trapdoors, doors, logs, pillars, and other directional blocks
-- **Liquid pass** — places water/lava after all solid blocks to avoid breaking pathing
-- **Build checkpoints** — persists progress to disk for resume after disconnect
+Load a Litematica schematic and build it automatically — or toggle manual mode to place blocks yourself.
+
+- **AutoBuild** — walks to each zone, grabs materials from supply chests, places blocks, and moves on
+- **Supply restocking** — indexes chests and shulker boxes; walks back to resupply when inventory runs low
+- **Shulker handling** — places, opens, loots, and breaks shulkers from supply; cleans up temp platforms
+- **Scaffold cleanup** — removes bridges and pillars placed during pathfinding after the build
+- **Self-correction** — detects wrong blocks and replaces them
+- **Smart tool selection** — picks the fastest tool for breaking
+- **Directional blocks** — handles stairs, slabs, trapdoors, doors, logs, pillars, etc.
+- **Liquid pass** — places water/lava after solids to keep pathfinding intact
+- **Checkpoints** — saves progress to SQLite; resume after disconnect with `/printer resume`
+- **Area clearing** — mines out a region before building; dumps items into designated chests
+- **Pathfinding** — uses [Baritone](https://github.com/cabaletta/baritone) if installed, otherwise falls back to a built-in vanilla walker
 
 ### SpawnProofer
-- **Automated light placement** — scans a region for dark spawnable surfaces and places light sources
-- **Embed mode** — replaces ground blocks with full-block light sources (glowstone, sea lanterns, froglights, etc.)
-- **Greedy solver** — plans optimal light positions to cover the most dark spots per placement
-- **Supply chest support** — restocks light source materials automatically
+Define a region and let it place light sources on every dark spawnable surface.
 
-### Stash Scanner
+- **Greedy solver** — picks positions that cover the most dark spots per placement
+- **Embed mode** — swaps ground blocks for full-block lights (glowstone, sea lanterns, froglights)
+- **Supply chests** — restocks light sources automatically
+
+### Stash Manager
+Scan, index, and organize containers across large areas.
+
 - **Container indexing** — scans chests, barrels, shulker boxes, and hoppers in a defined region
-- **Incremental waypoints** — walks between zones for areas beyond render distance
-- **CSV export** — exports full inventory index to file
+- **Auto-organizing** — sorts items into columns, packs shulkers, handles overflow
+- **Waypoint walking** — navigates between zones for areas beyond render distance
+- **CSV export** — exports the full inventory index to file
+- **Dump chests** — designate chests for depositing mined items during area clearing
 
 ## Supported Versions
 
-| Minecraft | Fabric Loader | Fabric API | Java |
-|-----------|---------------|------------|------|
-| 1.21–1.21.1 | ≥ 0.18.4 | 0.116.9+1.21.1 | 21 |
-| 1.21.4 | ≥ 0.18.4 | 0.119.4+1.21.4 | 21 |
-| 1.21.5 | ≥ 0.18.4 | 0.128.2+1.21.5 | 21 |
-| 1.21.8 | ≥ 0.18.4 | 0.136.1+1.21.8 | 21 |
-| 1.21.9–1.21.10 | ≥ 0.18.4 | 0.138.4+1.21.10 | 21 |
-| 1.21.11 | ≥ 0.18.4 | 0.141.3+1.21.11 | 21 |
+| Minecraft | Fabric API | Java |
+|-----------|------------|------|
+| 1.21–1.21.1 | 0.116.9+1.21.1 | 21 |
+| 1.21.4 | 0.119.4+1.21.4 | 21 |
+| 1.21.5 | 0.128.2+1.21.5 | 21 |
+| 1.21.8 | 0.136.1+1.21.8 | 21 |
+| 1.21.9–1.21.10 | 0.138.4+1.21.10 | 21 |
+| 1.21.11 | 0.141.3+1.21.11 | 21 |
+
+All versions require [Fabric Loader](https://fabricmc.net/use/) ≥ 0.18.4.
 
 ## Installation
 
-1. Install [Fabric Loader](https://fabricmc.net/use/) (≥ 0.18.4)
+1. Install [Fabric Loader](https://fabricmc.net/use/) ≥ 0.18.4
 2. Drop [Fabric API](https://modrinth.com/mod/fabric-api) into `mods/`
 3. Drop the MOAR `.jar` for your MC version into `mods/`
 4. *(Optional)* Install [Baritone](https://github.com/cabaletta/baritone/releases) for pathfinding
 
-## Usage
+## Quick Start
 
-### Keybinding
+1. Load a schematic: `/printer load mybase.litematic`
+2. Stand where the build origin should be: `/printer here`
+3. Mark your supply chests: `/printer supply add` (look at each chest)
+4. Start building: `/printer autobuild`
+5. Check progress: `/printer status`
 
-| Key | Default | Action |
-|-----|---------|--------|
-| Toggle Printer | `Numpad 0` | Start/stop the printer |
+## Commands
 
-### Printer Commands
+### Printer
 
-| Command | Description |
-|---------|-------------|
-| `/printer toggle` | Toggle the printer on/off |
-| `/printer autobuild` | Toggle AutoBuild mode (automated zone progression) |
-| `/printer load <file>` | Load a `.litematic` schematic at current position |
+| Command | What it does |
+|---------|--------------|
+| `/printer toggle` | Start/stop the printer |
+| `/printer autobuild` | Toggle fully automated building |
+| `/printer load <file>` | Load a `.litematic` schematic |
 | `/printer unload` | Unload the current schematic |
 | `/printer detect` | Auto-detect active Litematica placements |
-| `/printer list` | List available `.litematic` files |
-| `/printer here` | Re-anchor schematic at current position |
-| `/printer pos <x> <y> <z>` | Set anchor to specific coordinates |
-| `/printer status` | Show progress, anchor, completion percentage |
-| `/printer materials` | Bill of materials with supply cross-reference |
-| `/printer resume` | Resume from last saved checkpoint |
-| `/printer speed [1–20]` | Set or show placement speed (blocks/sec, default 13) |
-| `/printer sort [mode]` | Set build order: `bottom_up` (default), `top_down`, `nearest` |
+| `/printer list` | List available schematic files |
+| `/printer here` | Anchor schematic to current position |
+| `/printer pos <x> <y> <z>` | Anchor schematic to specific coordinates |
+| `/printer status` | Show progress and completion percentage |
+| `/printer materials` | Show required materials vs. supply inventory |
+| `/printer resume` | Resume from last checkpoint |
+| `/printer speed [1–20]` | Get/set placement speed (default: 13 blocks/sec) |
+| `/printer sort [mode]` | Set build order: `bottom_up`, `top_down`, `nearest` |
 | `/printer air` | Toggle air placement (floating blocks) |
-| `/printer supply add [x y z]` | Mark a chest/barrel/shulker as supply source |
-| `/printer supply remove` | Unmark a supply chest |
+| `/printer supply add [x y z]` | Mark a container as a supply source |
+| `/printer supply remove` | Unmark the nearest supply chest |
 | `/printer supply list` | List all supply chests |
 | `/printer supply scan` | Show indexed supply inventory summary |
-| `/printer supply clear` | Clear all supply chests |
+| `/printer supply clear` | Remove all supply chests |
+| `/printer dump add [x y z]` | Mark a container as a dump chest |
+| `/printer dump remove` | Unmark the nearest dump chest |
+| `/printer dump list` | List all dump chests |
+| `/printer dump clear` | Remove all dump chests |
 
-### SpawnProof Commands
+### SpawnProofer
 
-| Command | Description |
-|---------|-------------|
+| Command | What it does |
+|---------|--------------|
 | `/spawnproof pos1 [x y z]` | Set corner 1 (default: player position) |
 | `/spawnproof pos2 [x y z]` | Set corner 2 |
-| `/spawnproof start` | Begin placing lights in the defined region |
+| `/spawnproof start` | Begin placing lights |
 | `/spawnproof stop` | Stop and reset |
-| `/spawnproof pause` | Pause mid-operation |
+| `/spawnproof pause` | Pause mid-run |
 | `/spawnproof resume` | Resume from pause |
-| `/spawnproof scan` | Scan for dark spots without placing |
-| `/spawnproof status` | Show state, corners, dark spots, lights placed |
-| `/spawnproof lightsrc [block]` | Set or show light source (torch, glowstone, lantern, etc.) |
-| `/spawnproof embed` | Toggle embed mode (replace ground with light source) |
-| `/spawnproof supply add` | Mark a chest as light source supply |
+| `/spawnproof scan` | Count dark spots without placing |
+| `/spawnproof status` | Show state, region, and placement count |
+| `/spawnproof lightsrc [block]` | Get/set light source block |
+| `/spawnproof embed` | Toggle embed mode |
+| `/spawnproof supply add` | Mark a chest as light supply |
 | `/spawnproof supply remove` | Unmark a supply chest |
 | `/spawnproof supply list` | List supply chests |
 
-### Stash Commands
+### Stash
 
-| Command | Description |
-|---------|-------------|
+| Command | What it does |
+|---------|--------------|
 | `/stash pos1 [x y z]` | Set corner 1 (default: player position) |
 | `/stash pos2 [x y z]` | Set corner 2 |
 | `/stash scan` | Scan all containers in the region |
-| `/stash stop` | Abort scanning |
+| `/stash organize` | Auto-organize: column sort, shulker pack, overflow |
+| `/stash organize stop` | Stop organizing |
+| `/stash stop` | Stop scanning |
 | `/stash status` | Show scan state and index summary |
 | `/stash export` | Export inventory index to CSV |
 | `/stash clear` | Clear the index |
+| `/stash dump add [x y z]` | Mark a dump chest |
+| `/stash dump remove` | Unmark the nearest dump chest |
+| `/stash dump list` | List all dump chests |
+| `/stash dump clear` | Remove all dump chests |
+
+### Keybinds
+
+| Key | Action |
+|-----|--------|
+| `Numpad 0` | Toggle printer on/off |
 
 ## Building from Source
 
 Requires **JDK 21+**.
 
 ```bash
-# Build all versions
-./gradlew build
-
-# Build a specific version
-./gradlew :1.21.8:build
-
-# Collect all JARs into one folder
-./gradlew buildAndCollect
-# Output: build/libs/1.1.0/
+./gradlew build                  # Build all versions
+./gradlew :1.21.8:build          # Build one version
+./gradlew buildAndCollect        # Collect all JARs → build/libs/1.2.1/
 ```
 
-Build artifacts go to `versions/<mc>/build/libs/moar-1.1.0+<mc>.jar`.
+Output: `versions/<mc>/build/libs/moar-1.2.1+<mc>.jar`
 
-### Build System
+### Build Stack
 
-| Tool | Version | Purpose |
-|------|---------|---------|
-| [Stonecutter](https://stonecutter.kikugie.dev/) | 0.8.3 | Multi-version preprocessor |
-| [Fabric Loom](https://github.com/FabricMC/fabric-loom) | 1.14-SNAPSHOT | Minecraft dev toolchain |
-| [Gradle](https://gradle.org/) | 9.2.1 | Build automation |
+| Tool | Version |
+|------|---------|
+| [Stonecutter](https://stonecutter.kikugie.dev/) | 0.8.3 |
+| [Fabric Loom](https://github.com/FabricMC/fabric-loom) | 1.16.1 |
+| [Gradle](https://gradle.org/) | 9.4.0 |
 
 ### Baritone Integration
 
-Baritone is accessed entirely via reflection — no compile-time dependency, nothing bundled. `PathWalker` detects Baritone at runtime via `Class.forName` and caches method handles. If absent, the mod falls back to its vanilla walker automatically.
+Baritone is loaded via reflection at runtime — no compile dependency, nothing bundled. If Baritone isn't installed, the mod uses its built-in vanilla walker instead.
 
 ## License
 
-This project is licensed under the [GNU Affero General Public License v3.0](LICENSE).
+[GNU Affero General Public License v3.0](LICENSE)
 
-**If you fork:** AGPL v3 requires forks to be public with changes indicated. You cannot obfuscate the code or restrict access. If you find a fork violating this, please let us know.
+Forks must remain public with changes indicated. See the license for details.

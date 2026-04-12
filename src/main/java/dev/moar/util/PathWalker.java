@@ -77,8 +77,10 @@ import java.lang.reflect.Constructor;
 import java.lang.reflect.Method;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.Deque;
 import java.util.List;
+import java.util.Map;
 
 // Walks player to target. Uses Baritone (reflection) if available, else vanilla movement.
 public final class PathWalker {
@@ -87,7 +89,7 @@ public final class PathWalker {
 
     private PathWalker() {}
 
-    // ── Baritone detection (cached) ─────────────────────────────────
+    // Baritone detection (cached)
 
     private static final boolean BARITONE_AVAILABLE;
     static {
@@ -106,12 +108,11 @@ public final class PathWalker {
         }
     }
 
-    /** Returns true if Baritone is present at runtime. */
     public static boolean isBaritoneAvailable() {
         return BARITONE_AVAILABLE;
     }
 
-    // ── vanilla config ──────────────────────────────────────────────
+    // vanilla config
 
     private static final double ARRIVAL_DIST_SQ = 2.5 * 2.5;
     private static final double ARRIVAL_Y_TOLERANCE = 3.0;
@@ -136,7 +137,7 @@ public final class PathWalker {
      *  Used to compute a distance-scaled timeout. */
     private static double initialDistance = 0;
 
-    // ── shared state ────────────────────────────────────────────────
+    // shared state
 
     private static BlockPos target;
     private static boolean active;
@@ -149,7 +150,7 @@ public final class PathWalker {
      *  trying to compute an impossible route. */
     private static int noPathTicks;
 
-    // ── vanilla-only state ──────────────────────────────────────────
+    // vanilla-only state
 
     /*? if >=26.1 {*//*
     private static Vec3 lastProgressPos;
@@ -172,7 +173,7 @@ public final class PathWalker {
      *  an XZ position.  Arrival is based on Y only. */
     private static int yLevelTarget = Integer.MIN_VALUE;
 
-    // ── mining descent state ────────────────────────────────────────
+    // mining descent state
     /** True when the player is descending by breaking the pillar
      *  beneath their feet — bypasses Baritone entirely. */
     private static boolean miningDescent;
@@ -202,21 +203,17 @@ public final class PathWalker {
      *  only offers blocks the player has in excess of these
      *  quantities so Baritone doesn't waste building materials as
      *  scaffold. */
-    private static java.util.Map<Item, Integer> reservedItems = java.util.Collections.emptyMap();
+    private static Map<Item, Integer> reservedItems = Collections.emptyMap();
 
     /**
-     * Tell PathWalker which items (and how many) are reserved for the
-     * schematic build.  Call this before any placement-enabled walk so
-     * that only surplus blocks are offered to Baritone as throwaway.
-     *
-     * @param needed  map of Item → count needed for the build, or
-     *                null to clear
+     * Set which items (and counts) are reserved for the build.
+     * Only surplus blocks are offered to Baritone as throwaway.
      */
-    public static void setReservedItems(java.util.Map<Item, Integer> needed) {
-        reservedItems = needed != null ? needed : java.util.Collections.emptyMap();
+    public static void setReservedItems(Map<Item, Integer> needed) {
+        reservedItems = needed != null ? needed : Collections.emptyMap();
     }
 
-    // ── public API ──────────────────────────────────────────────────
+    // public API
 
     /**
      * Start walking to the given position.
@@ -295,6 +292,36 @@ public final class PathWalker {
     }
 
     /**
+     * Start walking to the given position using vanilla WASD movement,
+     * bypassing Baritone entirely.  Useful when Baritone can't compute
+     * a path but the target is on roughly the same Y level and a
+     * straight-line walk is likely to succeed (e.g. clearing illegal
+     * blocks on flat terrain).
+     */
+    public static void walkToVanilla(BlockPos pos) {
+        if (BARITONE_AVAILABLE) {
+            BaritoneDelegate.stop();
+        }
+        /*? if >=26.1 {*//*
+        target = pos.immutable();
+        *//*?} else {*/
+        target = pos.toImmutable();
+        /*?}*/
+        active = true;
+        arrived = false;
+        stuck = false;
+        ticksWalking = 0;
+        goalRadius = 0;
+        yLevelTarget = Integer.MIN_VALUE;
+        lastProgressPos = null;
+        lastProgressTick = 0;
+        stuckCycles = 0;
+        vanillaFallback = true;
+        recordInitialDistance(pos);
+        LOGGER.debug("PathWalker: vanilla walking to ({}, {}, {})", pos.getX(), pos.getY(), pos.getZ());
+    }
+
+    /**
      * Walk to within radius blocks of the given position with
      * Baritone's allowPlace and allowParkour enabled.
      *
@@ -331,12 +358,7 @@ public final class PathWalker {
     }
 
     /**
-     * Start navigating to a specific Y level, ignoring horizontal
-     * position.  Uses Baritone's GoalYLevel — the player just needs
-     * to reach the given Y coordinate by any means (staircase, fall,
-     * etc.).  Arrival is checked by Y alone.
-     *
-     * @param y  the target Y level
+     * Navigate to a specific Y level using Baritone's GoalYLevel.
      */
     public static void walkToYLevel(int y) {
         if (BARITONE_AVAILABLE) {
@@ -357,12 +379,7 @@ public final class PathWalker {
     }
 
     /**
-     * Navigate to a specific Y level with Baritone's placement and
-     * parkour enabled — allows Baritone to build a staircase down or
-     * up to reach the target Y level.
-     *
-     * @param y       the target Y level
-     * @param player  player entity for configuring throwaway items
+     * Navigate to Y level with Baritone's placement and parkour enabled.
      */
     public static void walkToYLevelWithPlacement(int y,
                                                   /*? if >=26.1 {*//*
@@ -382,14 +399,8 @@ public final class PathWalker {
     }
 
     /**
-     * Start descending from a pillar by mining the blocks beneath
-     * the player's feet.  Each block break causes a safe 1-block
-     * fall.  This bypasses Baritone entirely — no pathfinding needed.
-     *
-     * Continues until the player reaches targetY or
-     * encounters a gap where falling would exceed 3 blocks (unsafe).
-     *
-     * @param targetY  the Y level to descend to
+     * Start descending from a pillar by mining blocks underfoot.
+     * Continues until targetY or an unsafe gap (>3 block fall).
      */
     public static void startMiningDescent(int targetY) {
         /*? if >=26.1 {*//*
@@ -435,19 +446,8 @@ public final class PathWalker {
     }
 
     /**
-     * Walk to a destination via a list of intermediate waypoints.
-     *
-     * Baritone navigates to each waypoint in order using GoalNear
-     * with the given radius.  When a waypoint is reached, the
-     * next one is automatically started.  When the final waypoint is
-     * reached, arrived is set to true.
-     *
-     * If Baritone fails to reach any waypoint, the walker stops
-     * normally (arrived=false) so the caller can handle the failure.
-     *
-     * @param waypoints  ordered list of positions to visit; the last
-     *                   entry is the final destination
-     * @param radius     GoalNear radius for each leg
+     * Walk to a destination via intermediate waypoints using GoalNear.
+     * Baritone auto-advances through each waypoint; arrived=true at end.
      */
     public static void walkToViaWaypoints(List<BlockPos> waypoints, int radius) {
         if (waypoints == null || waypoints.isEmpty()) return;
@@ -471,12 +471,7 @@ public final class PathWalker {
     }
 
     /**
-     * Walk to destinations via waypoints with per-waypoint GoalNear radii.
-     * This allows different legs to have different tolerances — e.g. loose
-     * radius for staircase-descent legs, tight radius for the final target.
-     *
-     * @param waypoints  ordered list of positions to visit
-     * @param radii      GoalNear radius for each waypoint (must be same size)
+     * Walk via waypoints with per-waypoint GoalNear radii.
      */
     public static void walkToViaWaypointsWithRadii(List<BlockPos> waypoints,
                                                     List<Integer> radii) {
@@ -515,12 +510,7 @@ public final class PathWalker {
     }
 
     /**
-     * Walk to destinations via waypoints with per-waypoint GoalNear radii,
-     * with Baritone's placement and parkour enabled for every leg.
-     *
-     * @param waypoints  ordered list of positions to visit
-     * @param radii      GoalNear radius for each waypoint (must be same size)
-     * @param player     player entity for configuring throwaway items
+     * Walk via waypoints with per-waypoint radii and placement enabled.
      */
     public static void walkToViaWaypointsWithRadiiAndPlacement(
             List<BlockPos> waypoints, List<Integer> radii,
@@ -543,16 +533,7 @@ public final class PathWalker {
     }
 
     /**
-     * Walk to a destination via intermediate waypoints with Baritone's
-     * allowPlace and allowParkour enabled for every leg.
-     *
-     * This combines the waypoint chain with placement mode so
-     * Baritone can bridge gaps, pillar up/down, and parkour-jump on
-     * each leg — essential for reaching supply chests at different
-     * elevations from the build area.
-     *
-     * @param waypoints  ordered list of positions to visit
-     * @param radius     GoalNear radius for each leg
+     * Walk via waypoints with placement and parkour enabled.
      */
     public static void walkToViaWaypointsWithPlacement(List<BlockPos> waypoints,
                                                         int radius) {
@@ -618,6 +599,7 @@ public final class PathWalker {
         vanillaFallback = false;
         waypointQueue.clear();
         waypointRadiusQueue.clear();
+        reservedItems = Collections.emptyMap();
         LOGGER.debug("PathWalker: stopped");
     }
 
@@ -664,9 +646,7 @@ public final class PathWalker {
         }
     }
 
-    // ═══════════════════════════════════════════════════════════════════
-    //  MINING DESCENT — break pillar beneath feet to descend.
-    // ═══════════════════════════════════════════════════════════════════
+    // --- MINING DESCENT — break pillar beneath feet to descend.
 
     private static void tickMiningDescent() {
         /*? if >=26.1 {*//*
@@ -859,9 +839,7 @@ public final class PathWalker {
         }
     }
 
-    // ═══════════════════════════════════════════════════════════════════
-    //  BARITONE PATH — accessed entirely via reflection.
-    // ═══════════════════════════════════════════════════════════════════
+    // --- BARITONE PATH — accessed entirely via reflection.
 
     private static void tickBaritone() {
         /*? if >=26.1 {*//*
@@ -874,12 +852,12 @@ public final class PathWalker {
             return;
         }
 
-        // ── grace period for path computation ───────────────────────
+        // grace period for path computation
         // Baritone needs a few ticks to compute the initial path.
         // Don't check isPathing() too early or we get a false negative.
         if (ticksWalking < 10) return;
 
-        // ── timeout check ───────────────────────────────────────────
+        // timeout check
         if (ticksWalking >= getEffectiveTimeout()) {
             LOGGER.warn("PathWalker[Baritone]: timeout after {} ticks (limit={})",
                     ticksWalking, getEffectiveTimeout());
@@ -895,7 +873,7 @@ public final class PathWalker {
             return;
         }
 
-        // ── no-progress stuck detection ────────────────────────────
+        // no-progress stuck detection
         // Baritone's process may stay "active" (it has a goal) while
         // failing to find a valid path.  In that case isPathing() stays
         // false because no path segment is being executed.  If this
@@ -903,7 +881,7 @@ public final class PathWalker {
         if (BaritoneDelegate.isProcessActive() && !BaritoneDelegate.isPathing()) {
             noPathTicks++;
 
-            // ── vanilla fallback for short distances ────────────────
+            // vanilla fallback for short distances
             // Baritone's A* can choke on very short paths near platform
             // edges / fences / gaps.  If the target is within ~10 blocks
             // and Baritone hasn't made progress in 2 seconds, stop
@@ -961,7 +939,7 @@ public final class PathWalker {
             noPathTicks = 0;
         }
 
-        // ── check if Baritone finished working toward the goal ─────
+        // check if Baritone finished working toward the goal
         // isProcessActive() checks whether the CustomGoalProcess is
         // still in control (computing or walking).  This is reliable
         // across segment recomputation pauses, unlike isPathing()
@@ -1076,7 +1054,7 @@ public final class PathWalker {
 
         private BaritoneDelegate() {}
 
-        // ── reflection handles (resolved once, cached) ──────────────
+        // reflection handles (resolved once, cached)
         private static boolean ready;
         private static Method getProvider;
         private static Method getPrimaryBaritone;
@@ -1091,7 +1069,7 @@ public final class PathWalker {
         private static Constructor<?> goalNearCtor;
         private static Constructor<?> goalYLevelCtor;
 
-        // ── settings reflection handles ─────────────────────────────
+        // settings reflection handles
         private static Method getSettings;
         private static Object settingsInstance;
         private static Object allowPlaceSetting;   // Settings.Setting<Boolean>
@@ -1152,7 +1130,7 @@ public final class PathWalker {
                 ready = false;
             }
 
-            // ── resolve settings reflection handles ─────────────────
+            // resolve settings reflection handles
             // These are optional — if they fail, placement-mode walks
             // just fall back to normal pathfinding (no block placement).
             settingsReady = false;
@@ -1257,17 +1235,9 @@ public final class PathWalker {
         }
 
         /**
-         * Scan the player's inventory for block items and add those
-         * with surplus quantities to Baritone's
-         * acceptableThrowawayItems list.
-         *
-         * "Surplus" means the player holds more of that item than
-         * what is reserved for the schematic build (set via
-         * PathWalker#setReservedItems).  This prevents
-         * Baritone from wasting blocks the printer still needs.
-         *
-         * Must be called after enablePlacement()
-         * so that the original list is saved first.
+         * Scan inventory for surplus block items and add them to
+         * Baritone's acceptableThrowawayItems. "Surplus" means held
+         * count exceeds what's reserved for the build.
          */
         @SuppressWarnings("unchecked")
         /*? if >=26.1 {*//*
@@ -1357,12 +1327,8 @@ public final class PathWalker {
         }
 
         /**
-         * Returns the current set of items Baritone considers acceptable
-         * for scaffold/throwaway placement.  Used by SchematicPrinter to
-         * detect which blocks in the world were placed by Baritone.
-         *
-         * @return set of item IDs (e.g. "minecraft:cobblestone"), or
-         *         empty set if reflection failed
+         * Returns the items Baritone considers acceptable for throwaway.
+         * Empty set if reflection failed.
          */
         @SuppressWarnings("unchecked")
         static java.util.Set<String> getThrowawayItemIds() {
@@ -1488,9 +1454,7 @@ public final class PathWalker {
         }
     }
 
-    // ═══════════════════════════════════════════════════════════════════
-    //  Fallback
-    // ═══════════════════════════════════════════════════════════════════
+    // --- Fallback
 
     private static void tickVanilla() {
         /*? if >=26.1 {*//*
@@ -1513,7 +1477,7 @@ public final class PathWalker {
         ClientPlayerEntity player = mc.player;
         /*?}*/
 
-        // ── timeout check ───────────────────────────────────────────
+        // timeout check
         if (ticksWalking >= getEffectiveTimeout()) {
             LOGGER.warn("PathWalker[Vanilla]: timeout after {} ticks", ticksWalking);
             releaseKeys();
@@ -1522,7 +1486,7 @@ public final class PathWalker {
             return;
         }
 
-        // ── arrival check ───────────────────────────────────────────
+        // arrival check
         /*? if >=26.1 {*//*
         Vec3 playerPos = player.position();
         *//*?} else if >=1.21.10 {*//*
@@ -1538,7 +1502,7 @@ public final class PathWalker {
         double dxz2 = horizontalDistSq(playerPos, targetCenter);
         double dy = Math.abs(playerPos.y - targetCenter.y);
 
-        // ── fall detection ──────────────────────────────────────────
+        // fall detection
         // If the player is now significantly below the target (fell off
         // a pillar/scaffold), vanilla walking can't recover — give up
         // so the caller can re-engage Baritone with placement enabled.
@@ -1559,7 +1523,7 @@ public final class PathWalker {
             return;
         }
 
-        // ── stuck detection ─────────────────────────────────────────
+        // stuck detection
         if (lastProgressPos == null) {
             lastProgressPos = playerPos;
             lastProgressTick = ticksWalking;
@@ -1590,7 +1554,7 @@ public final class PathWalker {
             lastProgressTick = ticksWalking;
         }
 
-        // ── look at target ──────────────────────────────────────────
+        // look at target
         double dx = targetCenter.x - playerPos.x;
         double dz = targetCenter.z - playerPos.z;
         /*? if >=26.1 {*//*
@@ -1626,7 +1590,7 @@ public final class PathWalker {
         player.setPitch(5.0f);
         /*?}*/
 
-        // ── movement ────────────────────────────────────────────────
+        // movement
         /*? if >=26.1 {*//*
         Options options = mc.options;
         *//*?} else {*/
@@ -1661,7 +1625,7 @@ public final class PathWalker {
         options.sprintKey.setPressed(facingTarget && dxz2 > 9.0);
         /*?}*/
 
-        // ── proactive obstacle jumping ──────────────────────────────
+        // proactive obstacle jumping
         /*? if >=26.1 {*//*
         if (player.onGround()) {
         *//*?} else {*/
@@ -1687,7 +1651,7 @@ public final class PathWalker {
         }
     }
 
-    // ── internals ───────────────────────────────────────────────────────
+    // internals
 
     /*? if >=26.1 {*//*
     private static boolean shouldJumpAhead(LocalPlayer player, Level world, float yaw) {

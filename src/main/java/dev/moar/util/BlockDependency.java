@@ -48,47 +48,19 @@ import net.minecraft.world.level.Level;
 import net.minecraft.world.World;
 /*?}*/
 
-/**
- * Determines block placement dependencies -- whether a block needs an
- * adjacent support block to be placed (e.g. torches need a floor or wall,
- * ladders need a wall behind them, lanterns can hang from the ceiling).
- *
- * Used by the placement queue to skip blocks whose support requirements
- * are not yet met, avoiding wasted placement attempts and false
- * "missing item" reports. Support blocks (stone, planks, etc.)
- * are freestanding and always placed first, building up the structure that
- * dependent blocks (torches, signs, flowers, rails, etc.) attach to.
- *
- * Dependency tiers:
- *   Tier 0 -- Freestanding: stone, planks, glass, slabs,
- *       stairs, logs, concrete, etc. No adjacent support needed.
- *   Tier 1 -- Floor-dependent: torches (standing), signs
- *       (standing), flowers, saplings, carpet, pressure plates, rails,
- *       redstone wire, repeaters, comparators, doors, beds, tall plants,
- *       candles, flower pots, sea pickles, skulls (standing).
- *   Tier 2 -- Wall-dependent: wall torches, wall signs,
- *       wall banners, ladders, wall skulls, tripwire hooks. Requires a
- *       solid block on the face the block is attached to.
- *   Tier 3 -- Ceiling-dependent: hanging signs, hanging
- *       lanterns, ceiling buttons / levers.
- *   Tier 4 -- Multi-face: vines (attach to one or more
- *       wall faces, or hang from block above). Handled separately.
- */
+// Block placement dependency resolution — determines whether a block
+// needs adjacent support (floor, wall, ceiling) before it can be placed.
 public final class BlockDependency {
 
     private BlockDependency() {}
 
-    // ═══════════════════════════════════════════════════════════════════
-    //  PUBLIC API
-    // ═══════════════════════════════════════════════════════════════════
+    // --- PUBLIC API
 
-    // Returns the direction from which the block requires support (e.g.
-    // DOWN for floor blocks, wall direction for wall torches), or null
-    // if freestanding. Vines are not handled here (use isReadyToPlace).
+    // Required support direction, or null if freestanding.
     public static Direction getRequiredSupport(BlockState state) {
         Block block = state.getBlock();
 
-        // ── Wall-mounted torches ────────────────────────────────
+        // Wall-mounted torches
         if (block instanceof WallTorchBlock
                 /*? if >=26.1 {*//*
                 || block instanceof RedstoneWallTorchBlock) {
@@ -107,7 +79,7 @@ public final class BlockDependency {
                 /*?}*/
             }
         }
-        // ── Standing torches ────────────────────────────────────
+        // Standing torches
         if (block instanceof TorchBlock
                 && !(block instanceof WallTorchBlock)) {
             return Direction.DOWN;
@@ -121,7 +93,7 @@ public final class BlockDependency {
             return Direction.DOWN;
         }
 
-        // ── Wall signs ──────────────────────────────────────────
+        // Wall signs
         if (block instanceof WallSignBlock
                 || block instanceof WallHangingSignBlock) {
             /*? if >=26.1 {*//*
@@ -136,18 +108,18 @@ public final class BlockDependency {
                 /*?}*/
             }
         }
-        // ── Standing signs ──────────────────────────────────────
+        // Standing signs
         if (block instanceof SignBlock
                 && !(block instanceof WallSignBlock)) {
             return Direction.DOWN;
         }
-        // ── Hanging signs (chain below a block) ─────────────────
+        // Hanging signs (chain below a block)
         if (block instanceof HangingSignBlock
                 && !(block instanceof WallHangingSignBlock)) {
             return Direction.UP;
         }
 
-        // ── Banners ─────────────────────────────────────────────
+        // Banners
         if (block instanceof AbstractBannerBlock
                 && !(block instanceof WallBannerBlock)) {
             return Direction.DOWN;
@@ -166,7 +138,7 @@ public final class BlockDependency {
             }
         }
 
-        // ── Ladders ─────────────────────────────────────────────
+        // Ladders
         if (block instanceof LadderBlock) {
             /*? if >=26.1 {*//*
             if (state.hasProperty(BlockStateProperties.HORIZONTAL_FACING)) {
@@ -181,7 +153,7 @@ public final class BlockDependency {
             }
         }
 
-        // ── Lanterns ────────────────────────────────────────────
+        // Lanterns
         if (block instanceof LanternBlock) {
             /*? if >=26.1 {*//*
             if (state.hasProperty(BlockStateProperties.HANGING)
@@ -198,7 +170,7 @@ public final class BlockDependency {
             return Direction.DOWN;
         }
 
-        // ── Buttons / Levers (floor, wall, ceiling) ─────────────
+        // Buttons / Levers (floor, wall, ceiling)
         if (block instanceof ButtonBlock || block instanceof LeverBlock) {
             /*? if >=26.1 {*//*
             if (state.hasProperty(BlockStateProperties.ATTACH_FACE)) {
@@ -232,7 +204,7 @@ public final class BlockDependency {
             }
         }
 
-        // ── Skulls / heads ──────────────────────────────────────
+        // Skulls / heads
         if (block instanceof WallSkullBlock) {
             /*? if >=26.1 {*//*
             if (state.hasProperty(BlockStateProperties.HORIZONTAL_FACING)) {
@@ -251,7 +223,7 @@ public final class BlockDependency {
             return Direction.DOWN;
         }
 
-        // ── Trapdoors ───────────────────────────────────────────
+        // Trapdoors
         /*? if >=26.1 {*//*
         if (block instanceof TrapDoorBlock) {
         *//*?} else {*/
@@ -275,7 +247,7 @@ public final class BlockDependency {
             }
         }
 
-        // ── Doors / Beds / Tall plants ──────────────────────────
+        // Doors / Beds / Tall plants
         if (block instanceof DoorBlock)      return Direction.DOWN;
         if (block instanceof BedBlock)       return Direction.DOWN;
         /*? if >=26.1 {*//*
@@ -283,7 +255,7 @@ public final class BlockDependency {
         *//*?} else {*/
         if (block instanceof TallPlantBlock) return Direction.DOWN;
         /*?}*/
-        // ── Hoppers ─────────────────────────────────────────
+        // Hoppers
         //  Hopper facing is determined by the clicked face. The block
         //  in the output direction must exist first so we can click it.
         if (block instanceof HopperBlock) {
@@ -303,7 +275,7 @@ public final class BlockDependency {
                 return facing;
             }
         }
-        // ── Floor-dependent blocks (previously uncovered) ───────
+        // Floor-dependent blocks (previously uncovered)
         if (block instanceof CarpetBlock)               return Direction.DOWN;
         /*? if >=26.1 {*//*
         if (block instanceof BasePressurePlateBlock) return Direction.DOWN;
@@ -329,7 +301,7 @@ public final class BlockDependency {
         if (block instanceof CandleBlock)                return Direction.DOWN;
         if (block instanceof SeaPickleBlock)             return Direction.DOWN;
 
-        // ── Tripwire hooks ──────────────────────────────────────
+        // Tripwire hooks
         /*? if >=26.1 {*//*
         if (block instanceof TripWireHookBlock) {
         *//*?} else {*/
@@ -348,7 +320,7 @@ public final class BlockDependency {
             }
         }
 
-        // ── Amethyst clusters / buds ────────────────────────────
+        // Amethyst clusters / buds
         if (block instanceof AmethystClusterBlock) {
             /*? if >=26.1 {*//*
             if (state.hasProperty(BlockStateProperties.FACING)) {
@@ -372,7 +344,7 @@ public final class BlockDependency {
         if (block instanceof PlantBlock) return Direction.DOWN;
         /*?}*/
 
-        // ── Freestanding — no dependency ────────────────────────
+        // Freestanding — no dependency
         return null;
     }
 
@@ -386,7 +358,7 @@ public final class BlockDependency {
                                           BlockState target) {
         Block block = target.getBlock();
 
-        // ── Vines: multiple attachment faces ────────────────────
+        // Vines: multiple attachment faces
         if (block instanceof VineBlock) {
             return hasVineSupport(world, pos, target);
         }
@@ -412,9 +384,7 @@ public final class BlockDependency {
         return getRequiredSupport(state) == null ? 0 : 1;
     }
 
-    // ═══════════════════════════════════════════════════════════════════
-    //  INTERNAL HELPERS
-    // ═══════════════════════════════════════════════════════════════════
+    // --- INTERNAL HELPERS
 
     // True if block at pos is solid (non-replaceable with collision shape).
     /*? if >=26.1 {*//*

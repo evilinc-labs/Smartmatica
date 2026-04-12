@@ -160,6 +160,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Random;
 import java.util.Set;
+import java.util.concurrent.ThreadLocalRandom;
 
 /**
  * Core automation engine for block placement tasks.
@@ -225,12 +226,7 @@ public final class PlacementEngine {
     private static int    bps               = 13;
     private static long   lastPlacementNano = 0;
 
-    // ── Server-side placement verification ──────────────────────────
-    // After sending a placement packet, the server may reject it (e.g.
-    // anti-cheat such as Grim/Vulcan/NoCheatPlus rolling back the block).
-    // We set the block client-side optimistically, then verify after a
-    // short delay that it persists.  Consecutive failures increment a
-    // counter that SchematicPrinter can read to detect server rejection.
+    // Server-side placement verification — detect anti-cheat rollbacks.
     private static final int VERIFY_DELAY_TICKS = 4;
     private static final int MAX_VERIFY_QUEUE = 32;
     private static int consecutiveRejections = 0;
@@ -248,10 +244,7 @@ public final class PlacementEngine {
         totalRejections = 0;
     }
 
-    /**
-     * Must be called once per game tick (from the main tick loop) to
-     * process the verification queue.
-     */
+    /** Tick the verification queue. Call once per game tick. */
     public static void tickVerification() {
         /*? if >=26.1 {*//*
         Minecraft mc = Minecraft.getInstance();
@@ -421,11 +414,7 @@ public final class PlacementEngine {
     private static Map<Item, Integer> cachedInventory = Map.of();
     private static long cachedInventoryTick = -1;
 
-    /**
-     * Returns a cached snapshot of the player's inventory contents.
-     * The cache is invalidated once per game tick, so multiple callers
-     * within the same tick share the same map without re-scanning.
-     */
+    /** Cached inventory (invalidated once per tick). */
     public static Map<Item, Integer> getInventoryContentsCached() {
         /*? if >=26.1 {*//*
         Minecraft mc = Minecraft.getInstance();
@@ -449,7 +438,7 @@ public final class PlacementEngine {
         return cachedInventory;
     }
 
-    /** @return true when a block was placed */
+    /** Tick the placement state machine. Returns true when a block was placed. */
     public static boolean tick() {
         return switch (phase) {
             case IDLE     -> false;
@@ -2025,6 +2014,34 @@ public final class PlacementEngine {
         /*?}*/
     }
 
+    /**
+     * Sets yaw/pitch with jitter, relying on vanilla's end-of-tick
+     * flying packet to avoid anti-cheat duplicate-packet flags.
+     */
+    /*? if >=26.1 {*//*
+    public static void setLookRotation(LocalPlayer player, float yaw, float pitch) {
+    *//*?} else {*/
+    public static void setLookRotation(ClientPlayerEntity player, float yaw, float pitch) {
+    /*?}*/
+        float jitter = ThreadLocalRandom.current().nextFloat() * 0.02f - 0.01f;
+        /*? if >=26.1 {*//*
+        pitch = Mth.clamp(pitch + jitter, -90.0f, 90.0f);
+        *//*?} else {*/
+        pitch = MathHelper.clamp(pitch + jitter, -90.0f, 90.0f);
+        /*?}*/
+        yaw += jitter;
+        /*? if >=26.1 {*//*
+        player.setYRot(yaw);
+        *//*?} else {*/
+        player.setYaw(yaw);
+        /*?}*/
+        /*? if >=26.1 {*//*
+        player.setXRot(pitch);
+        *//*?} else {*/
+        player.setPitch(pitch);
+        /*?}*/
+    }
+
     /** Releases sneak for interaction; returns a Runnable that restores it. */
     /*? if >=26.1 {*//*
     public static Runnable releaseForInteraction(LocalPlayer player) {
@@ -2274,11 +2291,7 @@ public final class PlacementEngine {
         }
     }
 
-    /**
-     * Build a snapshot of all items in the player's inventory.
-     *
-     * @return map of Item → total count (across all slots)
-     */
+    /** Snapshot of all items in the player's inventory (Item → total count). */
     public static Map<Item, Integer> getInventoryContents() {
         /*? if >=26.1 {*//*
         Minecraft mc = Minecraft.getInstance();

@@ -42,29 +42,7 @@ import org.slf4j.LoggerFactory;
 
 import java.util.Map;
 
-/**
- * Registers all /spawnproof client commands.
- *
- * /spawnproof pos1                    -- set corner 1 to current position
- * /spawnproof pos2                    -- set corner 2 to current position
- * /spawnproof pos1 x y z             -- set corner 1 to specific coords
- * /spawnproof pos2 x y z             -- set corner 2 to specific coords
- * /spawnproof lightsrc [block]        -- set the light source block to use
- * /spawnproof embed                   -- toggle embed-in-ground mode
- * /spawnproof start                   -- start spawnproofing
- * /spawnproof stop                    -- stop spawnproofing
- * /spawnproof pause                   -- pause spawnproofing
- * /spawnproof resume                  -- resume spawnproofing
- * /spawnproof status                  -- show current status
- * /spawnproof scan                    -- scan area and show dark spot count
- * /spawnproof supply add              -- add chest at crosshair as supply
- * /spawnproof supply remove           -- remove supply chest at crosshair
- * /spawnproof supply list             -- list all supply chests
- * /spawnproof chest add               -- add supply chest at crosshair (alias)
- * /spawnproof chest remove            -- remove supply chest at crosshair
- * /spawnproof chest list              -- list supply chests
- * /spawnproof chest clear             -- clear all supply chests
- */
+// Registers all /spawnproof client commands.
 public final class SpawnProofCommand {
 
     private static final Logger LOGGER = LoggerFactory.getLogger("MOAR");
@@ -96,7 +74,7 @@ public final class SpawnProofCommand {
                 return 1;
             });
 
-            // ── Area selection ────────────────────────────────────────
+            // Area selection
 
             // /spawnproof pos1
             /*? if >=26.1 {*//*
@@ -204,7 +182,7 @@ public final class SpawnProofCommand {
                     )
             );
 
-            // ── Light source ─────────────────────────────────────────
+            // Light source
 
             // /spawnproof lightsrc [block]
             /*? if >=26.1 {*//*
@@ -282,7 +260,7 @@ public final class SpawnProofCommand {
                     })
             );
 
-            // ── Control ─────────────────────────────────────────────
+            // Control
 
             // /spawnproof start
             /*? if >=26.1 {*//*
@@ -442,7 +420,7 @@ public final class SpawnProofCommand {
                     })
             );
 
-            // ── Supply chests (for light sources) ────────────────────
+            // Supply chests
 
             /*? if >=26.1 {*//*
             root.then(ClientCommands.literal("supply")
@@ -521,7 +499,7 @@ public final class SpawnProofCommand {
                     )
             );
 
-            // ── Storage chests → Supply chests for light sources ─────
+            // Chest aliases (delegates to supply)
 
             /*? if >=26.1 {*//*
             root.then(ClientCommands.literal("chest")
@@ -631,7 +609,7 @@ public final class SpawnProofCommand {
         });
     }
 
-    // ── Helpers ──────────────────────────────────────────────────────────
+    // Helpers
 
     private static SpawnProofer getProofer() {
         return MoarMod.getSpawnProofer();

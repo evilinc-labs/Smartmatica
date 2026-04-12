@@ -30,11 +30,11 @@ public final class EdgeDetector {
 
     private static final double PROBE_MARGIN = 0.30; // margin beyond hitbox for drop-off detection
 
-    // ── per-tick cache (isNearEdge is called per render frame) ───────
+    // per-tick cache (isNearEdge is called per render frame)
     private static long   cachedTick   = Long.MIN_VALUE;
     private static boolean cachedResult = false;
 
-    // True if the player is near a 3+ block drop (dangerous ledge).
+    // Check for adjacent 3+ block drops.
     /*? if >=26.1 {*//*
     public static boolean isNearEdge(LocalPlayer player, Level world) {
     *//*?} else {*/

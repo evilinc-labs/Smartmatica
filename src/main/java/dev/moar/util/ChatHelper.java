@@ -56,7 +56,7 @@ public final class ChatHelper {
                 message);
     }
 
-    // ── internals ───────────────────────────────────────────────────────
+    // internals
 
     /*? if >=26.1 {*//*
     private static void send(MutableComponent prefix, String message) {

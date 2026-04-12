@@ -55,7 +55,7 @@ public final class PrinterResourceManager {
 
     private PrinterResourceManager() {}
 
-    // ── delegated supply-chest API (kept for backward compat) ───────────
+    // delegated supply-chest API (kept for backward compat)
 
     public static boolean addSupplyChest(BlockPos pos) {
         return MoarMod.getChestManager().addSupplyChest(pos);
@@ -89,23 +89,28 @@ public final class PrinterResourceManager {
         return MoarMod.getChestManager().findBestChest(from, neededItemIds);
     }
 
-    /** Load persisted data from disk (supply chest positions + scaffold). */
+    /** Load all persisted data from the SQLite database. */
     public static void load() {
+        // Open the shared database first — all modules read from it
+        MoarMod.getDatabase().open();
+
         MoarMod.getChestManager().loadSupplyChests();
+        MoarMod.getChestManager().loadDumpChests();
+        MoarMod.getChestManager().loadSortingConfig();
+        MoarMod.getChestManager().loadKeepItems();
         PrinterDatabase.loadScaffold();
+        MoarMod.getStashManager().loadFromDatabase();
+        MoarMod.getSpawnProofer().loadConfig();
     }
 
-    /** Save supply-chest positions to disk. */
+    /** Save supply-chest positions to the database. */
     public static void save() {
         MoarMod.getChestManager().saveSupplyChests();
     }
 
-    // ── materials analysis ──────────────────────────────────────────────
+    // materials analysis
 
-    /**
-     * Computes the full bill of materials for a schematic: what's needed,
-     * what's already placed, and what's missing.
-     */
+    /** Compute materials analysis: needed, placed, missing. */
     public static MaterialsReport analyzeMaterials(
             LitematicaSchematic schematic,
             BlockPos anchor,
@@ -277,7 +282,7 @@ public final class PrinterResourceManager {
         );
     }
 
-    // ── materials report record ─────────────────────────────────────────
+    // materials report record
 
     public record MaterialsReport(
             Map<String, Integer> required,
@@ -327,7 +332,7 @@ public final class PrinterResourceManager {
 
 
 
-    // ── fluid helpers ───────────────────────────────────────────────────
+    // fluid helpers
 
     /**
      * Returns the bucket item needed to place the given fluid block,

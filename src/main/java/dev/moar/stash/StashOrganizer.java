@@ -132,7 +132,7 @@ public final class StashOrganizer {
 
     private static final Logger LOGGER = LoggerFactory.getLogger("MOAR/Organizer");
 
-    // ── State machine ───────────────────────────────────────────────────
+    // State machine
 
     public enum State {
         IDLE,
@@ -178,24 +178,25 @@ public final class StashOrganizer {
     private State state = State.IDLE;
     private TargetRole currentRole = TargetRole.SOURCE;
 
-    // ── References ──────────────────────────────────────────────────────
+    // References
 
     private StashManager stashManager;
 
-    // ── Task queue ──────────────────────────────────────────────────────
+    // Task queue
 
-    record MoveTask(BlockPos source, BlockPos destination, String itemId) {}
+    // Optional shulkerContentFilter limits moves to matching shulkers.
+    record MoveTask(BlockPos source, BlockPos destination, String itemId, String shulkerContentFilter) {
+        MoveTask(BlockPos source, BlockPos destination, String itemId) {
+            this(source, destination, itemId, null);
+        }
+    }
 
     private final Deque<MoveTask> taskQueue = new ArrayDeque<>();
     private MoveTask currentTask;
 
     /**
-     * A chain of connected containers forming a storage column.
-     * Detected via connected-component analysis: two containers are neighbors
-     * if they're within 1 block horizontal distance and 1-2 blocks vertical.
-     * This handles both pure-vertical stacks and staircase/hopper designs.
-     * Sorted top-down (highest Y first) — depositing fills from top so the
-     * bottom chest stays accessible for the user to pull from.
+     * Connected containers forming a vertical column. Sorted top-down
+     * so depositing fills from top (bottom stays accessible to user).
      */
     record Column(int id, List<BlockPos> chests) {
         BlockPos bottom() { return chests.get(chests.size() - 1); }
@@ -208,20 +209,24 @@ public final class StashOrganizer {
     /** Index for depositing: which column-chest index we're currently filling. */
     private int depositColumnIndex;
 
-    // ── Configuration ───────────────────────────────────────────────────
+    // Configuration
 
     /** Destination chest(s) for empty shulker boxes after organization. */
     private BlockPos emptyShulkerDest;
 
-    // ── Timing constants ────────────────────────────────────────────────
+    // Timing constants
 
     private static final int OPEN_TIMEOUT_TICKS = 60;
     private static final int CLICK_COOLDOWN_TICKS = 3;
     private static final int PLACE_DELAY_TICKS = 4;
     private static final int PICKUP_DELAY_TICKS = 20;
     private static final int BREAK_TIMEOUT_TICKS = 100;
+    /** Minimum loose item count to justify packing into a shulker box. */
+    private static final int CONDENSE_MIN_ITEMS = 1;
+    /** Number of hotbar slots to exclude from scanning/depositing. */
+    private static final int HOTBAR_SIZE = 9;
 
-    // ── Runtime state ───────────────────────────────────────────────────
+    // Runtime state
 
     private BlockPos walkTarget;
     private int openWaitTicks;
@@ -231,7 +236,7 @@ public final class StashOrganizer {
     private int totalTasks;
     private int completedTasks;
 
-    // ── Shulker packing state ───────────────────────────────────────────
+    // Shulker packing state
 
     /** Items in player inventory that need to be packed into a shulker. */
     private String packItemId;
@@ -246,7 +251,7 @@ public final class StashOrganizer {
     /** Retry counter for shulker placement attempts. */
     private int shulkerPlaceRetries;
 
-    // ── Crafting state ──────────────────────────────────────────────────
+    // Crafting state
 
     /** Position of the crafting table to use. */
     private BlockPos craftingTablePos;
@@ -261,21 +266,21 @@ public final class StashOrganizer {
     /** Chests still needed from region containers. */
     private int chestsNeeded;
 
-    // ── Consolidation state ─────────────────────────────────────────────
+    // Consolidation state
 
     /** Queue of take-only tasks for packing misc items into mixed shulkers. */
     private final Deque<MoveTask> consolidationQueue = new ArrayDeque<>();
     /** True when processing consolidation tasks (mixed-item shulker packing). */
     private boolean consolidationMode = false;
 
-    // ── Overflow state ──────────────────────────────────────────────────
+    // Overflow state
 
     /** Position of the overflow chest. */
     private BlockPos overflowChestPos;
     /** Items that couldn't be organized (itemId → quantity). */
     private final Map<String, Integer> overflowItems = new LinkedHashMap<>();
 
-    // ── Public API ──────────────────────────────────────────────────────
+    // Public API
 
     public void setStashManager(StashManager mgr) { this.stashManager = mgr; }
     public State getState() { return state; }
@@ -287,7 +292,7 @@ public final class StashOrganizer {
     public int getTotalTasks() { return totalTasks; }
     public int getCompletedTasks() { return completedTasks; }
 
-    // ── Lifecycle ───────────────────────────────────────────────────────
+    // Lifecycle
 
     public boolean start() {
         if (stashManager == null) {
@@ -303,9 +308,16 @@ public final class StashOrganizer {
             return false;
         }
 
-        overflowItems.clear();
+        // Full reset — safe to call even if a previous run is DONE or IDLE
+        PathWalker.stop();
+        taskQueue.clear();
         consolidationQueue.clear();
+        overflowItems.clear();
+        currentTask = null;
+        walkTarget = null;
         consolidationMode = false;
+        completedTasks = 0;
+        totalTasks = 0;
         state = State.PLANNING;
         return true;
     }
@@ -330,10 +342,11 @@ public final class StashOrganizer {
         consolidationMode = false;
         currentTask = null;
         overflowItems.clear();
+        columnAssignment.clear();
         ChatHelper.labelled("Organize", "§eStopped.");
     }
 
-    // ── Tick ────────────────────────────────────────────────────────────
+    // Tick
 
     public void tick() {
         if (state == State.IDLE || state == State.DONE) return;
@@ -383,7 +396,7 @@ public final class StashOrganizer {
         }
     }
 
-    // ── PLANNING ────────────────────────────────────────────────────────
+    // PLANNING
 
     private void tickPlanning() {
         Map<BlockPos, ContainerEntry> region = getRegionContainers();
@@ -437,6 +450,33 @@ public final class StashOrganizer {
             }
         }
 
+        // Step 2b: Map filled shulker boxes by their primary content type.
+        // shulkersByContent: contentItemId → list of (containerPos, shulkerType)
+        record ShulkerLoc(BlockPos pos, String shulkerType, String primaryContent) {}
+        Map<String, List<ShulkerLoc>> shulkersByContent = new LinkedHashMap<>();
+
+        for (var entry : region.entrySet()) {
+            BlockPos pos = entry.getKey();
+            ContainerEntry container = entry.getValue();
+            for (ShulkerDetail sd : container.shulkerDetails()) {
+                String primary = getPrimaryContent(sd.contents());
+                if (primary != null) {
+                    shulkersByContent.computeIfAbsent(primary, k -> new ArrayList<>())
+                            .add(new ShulkerLoc(pos, sd.shulkerType(), primary));
+                }
+            }
+        }
+
+        // Add shulker content weight to item totals so shulker-heavy types rank higher.
+        // Each filled shulker of type X adds its total item count toward X's weight.
+        for (var entry : shulkersByContent.entrySet()) {
+            String contentType = entry.getKey();
+            for (ShulkerLoc sl : entry.getValue()) {
+                itemLocations.computeIfAbsent(contentType, k -> new ArrayList<>());
+                // Don't double-count: weight is for column ranking only (0 quantity placeholder)
+            }
+        }
+
         // Step 3: Assign items to columns (largest type gets priority).
         columnAssignment = new LinkedHashMap<>();
         Set<Integer> assignedColumnIds = new HashSet<>();
@@ -479,8 +519,10 @@ public final class StashOrganizer {
 
             // More types than columns — share
             if (assigned == null) {
-                Column col = posToColumn.get(locations.get(0).pos());
-                if (col != null) assigned = col;
+                if (!locations.isEmpty()) {
+                    Column col = posToColumn.get(locations.get(0).pos());
+                    if (col != null) assigned = col;
+                }
                 sharedItemIds.add(itemId);
                 shared++;
             }
@@ -491,24 +533,37 @@ public final class StashOrganizer {
             }
         }
 
-        // Step 4: Generate move tasks (shared items go to consolidation queue).
+        // Step 4: Generate move tasks.
+        // Items with enough loose quantity are condensed into shulker boxes.
+        // Items below the threshold are moved loose to the correct column.
         taskQueue.clear();
         consolidationQueue.clear();
 
+        int condenseTypes = 0;
         for (var entry : columnAssignment.entrySet()) {
             String itemId = entry.getKey();
             Column col = entry.getValue();
             Set<BlockPos> columnChests = new HashSet<>(col.chests());
 
             List<ItemLocation> locations = itemLocations.get(itemId);
+            if (locations == null || locations.isEmpty()) continue;
+
+            int totalLoose = locations.stream().mapToInt(ItemLocation::quantity).sum();
+
             if (sharedItemIds.contains(itemId)) {
-                // Consolidation: take from all locations (pack into mixed shulker later)
+                // Shared items: pack into mixed shulkers (more types than columns)
                 for (ItemLocation loc : locations) {
                     consolidationQueue.add(new MoveTask(loc.pos(), col.top(), itemId));
                 }
-            } else {
+            } else if (totalLoose >= CONDENSE_MIN_ITEMS) {
+                // Enough loose items to pack into shulker boxes
                 for (ItemLocation loc : locations) {
-                    // Move items not in THIS column to the top of the column
+                    consolidationQueue.add(new MoveTask(loc.pos(), col.top(), itemId));
+                }
+                condenseTypes++;
+            } else {
+                // Below threshold: move loose items to correct column as-is
+                for (ItemLocation loc : locations) {
                     if (!columnChests.contains(loc.pos())) {
                         taskQueue.add(new MoveTask(loc.pos(), col.top(), itemId));
                     }
@@ -516,8 +571,34 @@ public final class StashOrganizer {
             }
         }
 
-        // If destination is set, add tasks to move empty shulker box items there
-        if (emptyShulkerDest != null) {
+        // Sort consolidation queue by item type so same-type tasks run together
+        if (!consolidationQueue.isEmpty()) {
+            List<MoveTask> sorted = new ArrayList<>(consolidationQueue);
+            sorted.sort(Comparator.comparing(MoveTask::itemId));
+            consolidationQueue.clear();
+            consolidationQueue.addAll(sorted);
+        }
+
+        // Step 4b: Move filled shulker boxes to matching content columns.
+        int shulkerMoves = 0;
+        for (var entry : shulkersByContent.entrySet()) {
+            String contentType = entry.getKey();
+            Column col = columnAssignment.get(contentType);
+            if (col == null) continue;
+            Set<BlockPos> columnChests = new HashSet<>(col.chests());
+
+            for (ShulkerLoc sl : entry.getValue()) {
+                if (!columnChests.contains(sl.pos())) {
+                    // Move this filled shulker to the content type's column
+                    taskQueue.add(new MoveTask(sl.pos(), col.top(),
+                            "minecraft:" + sl.shulkerType(), contentType));
+                    shulkerMoves++;
+                }
+            }
+        }
+
+        // Move empty shulker boxes to destination only if not needed for condensing
+        if (emptyShulkerDest != null && condenseTypes == 0) {
             for (var entry : region.entrySet()) {
                 BlockPos pos = entry.getKey();
                 if (pos.equals(emptyShulkerDest)) continue;
@@ -546,19 +627,18 @@ public final class StashOrganizer {
         ChatHelper.labelled("Organize", "§aPlanned §f" + totalTasks
                 + "§a moves across §f" + columns.size() + "§a columns "
                 + "(§f" + columnAssignment.size() + "§a types"
-                + (shared > 0 ? ", §e" + shared + " to consolidate" : "") + "§a).");
+                + (condenseTypes > 0 ? ", §b" + condenseTypes + " to condense" : "")
+                + (shared > 0 ? ", §e" + shared + " to consolidate" : "")
+                + (shulkerMoves > 0 ? ", §d" + shulkerMoves + " shulker sorts" : "") + "§a).");
         if (!consolidationQueue.isEmpty()) {
             ChatHelper.labelled("Organize", "§7" + consolidationQueue.size()
-                    + " consolidation tasks (will pack into mixed shulkers).");
+                    + " condensing tasks (will pack loose items into shulker boxes).");
         }
         advanceToNextTask();
     }
 
     /**
-     * Detect columns of containers using connected-component flood-fill.
-     * Two containers are neighbors if horizontal Manhattan distance ≤ 1
-     * and vertical distance is 1-2 blocks (handles staircase + hopper gaps).
-     * Each column is sorted top-down (highest Y first) for top-first depositing.
+     * Detect columns via connected-component flood-fill. Sorted top-down.
      */
     private static List<Column> detectColumns(Set<BlockPos> positions) {
         Set<BlockPos> remaining = new HashSet<>(positions);
@@ -603,7 +683,7 @@ public final class StashOrganizer {
 
     private record ItemLocation(BlockPos pos, int quantity) {}
 
-    // ── WALKING (shared by multiple phases) ─────────────────────────────
+    // WALKING (shared by multiple phases)
 
     /*? if >=26.1 {*//*
     private void tickWalking(Minecraft mc) {
@@ -665,7 +745,7 @@ public final class StashOrganizer {
         }
     }
 
-    // ── OPENING (container) ─────────────────────────────────────────────
+    // OPENING (container)
 
     /*? if >=26.1 {*//*
     private void tickOpening(Minecraft mc) {
@@ -747,7 +827,7 @@ public final class StashOrganizer {
         }
     }
 
-    // ── TAKING (chest → player inventory) ───────────────────────────────
+    // TAKING (chest → player inventory)
 
     /*? if >=26.1 {*//*
     private void tickTaking(Minecraft mc) {
@@ -786,6 +866,12 @@ public final class StashOrganizer {
             if (!stack.isEmpty()) {
                 String itemId = ItemIdentifier.getItemId(stack);
                 if (itemId.equals(currentTask.itemId())) {
+                    // Content-filtered shulker moves: only take shulkers with matching contents
+                    if (currentTask.shulkerContentFilter() != null
+                            && !shulkerMatchesContent(stack, currentTask.shulkerContentFilter())) {
+                        actionSlotIndex++;
+                        continue;
+                    }
                     if (!hasInventoryRoom(mc.player)) {
                         break;
                     }
@@ -823,13 +909,18 @@ public final class StashOrganizer {
         mc.player.closeHandledScreen();
         /*?}*/
         if (consolidationMode) {
+            // If inventory was full mid-chest, re-queue so remaining items
+            // get collected on a later pass.
+            if (!hasInventoryRoom(mc.player) && currentTask != null) {
+                consolidationQueue.addFirst(currentTask);
+            }
             advanceConsolidation();
         } else {
             transitionToDestination();
         }
     }
 
-    // ── DEPOSITING (player inventory → chest) ───────────────────────────
+    // DEPOSITING (player inventory → chest)
 
     /*? if >=26.1 {*//*
     private void tickDepositing(Minecraft mc) {
@@ -858,6 +949,9 @@ public final class StashOrganizer {
         int chestSlotCount = containerHandler.getRows() * 9;
         /*?}*/
 
+        // Skip hotbar slots — player's hotbar is protected
+        if (actionSlotIndex < HOTBAR_SIZE) actionSlotIndex = HOTBAR_SIZE;
+
         while (actionSlotIndex < 36) {
             /*? if >=26.1 {*//*
             ItemStack stack = mc.player.getInventory().getItem(actionSlotIndex);
@@ -867,6 +961,12 @@ public final class StashOrganizer {
             if (!stack.isEmpty()) {
                 String itemId = ItemIdentifier.getItemId(stack);
                 if (itemId.equals(currentTask.itemId())) {
+                    // Content-filtered shulker moves: only deposit matching shulkers
+                    if (currentTask.shulkerContentFilter() != null
+                            && !shulkerMatchesContent(stack, currentTask.shulkerContentFilter())) {
+                        actionSlotIndex++;
+                        continue;
+                    }
                     if (!hasChestRoom(containerHandler)) {
                         // Chest full — try the next chest down in this column
                         /*? if >=26.1 {*//*
@@ -949,9 +1049,7 @@ public final class StashOrganizer {
         return false;
     }
 
-    // ═══════════════════════════════════════════════════════════════════
-    //  SHULKER PACKING — place → open → fill → break → store
-    // ═══════════════════════════════════════════════════════════════════
+    // --- SHULKER PACKING — place → open → fill → break → store
 
     // Begin shulker packing (destination full, items remain).
     private void startShulkerPacking(String itemId, BlockPos destination) {
@@ -991,7 +1089,7 @@ public final class StashOrganizer {
         startOverflow();
     }
 
-    // ── SHULKER_SELECTING — swap empty shulker to hotbar ────────────────
+    // SHULKER_SELECTING — swap empty shulker to hotbar
 
     /*? if >=26.1 {*//*
     private void tickShulkerSelecting(Minecraft mc) {
@@ -1081,7 +1179,7 @@ public final class StashOrganizer {
         shulkerTicks = 0;
     }
 
-    // ── SHULKER_PLACING — place shulker in world ────────────────────────
+    // SHULKER_PLACING — place shulker in world
 
     /*? if >=26.1 {*//*
     private void tickShulkerPlacing(Minecraft mc) {
@@ -1147,7 +1245,7 @@ public final class StashOrganizer {
         shulkerTicks = 0;
     }
 
-    // ── SHULKER_WAIT_PLACE — verify placement ──────────────────────────
+    // SHULKER_WAIT_PLACE — verify placement
 
     /*? if >=26.1 {*//*
     private void tickShulkerWaitPlace(Minecraft mc) {
@@ -1180,7 +1278,7 @@ public final class StashOrganizer {
         }
     }
 
-    // ── SHULKER_OPENING — open the placed shulker ──────────────────────
+    // SHULKER_OPENING — open the placed shulker
 
     /*? if >=26.1 {*//*
     private void tickShulkerOpening(Minecraft mc) {
@@ -1271,7 +1369,8 @@ public final class StashOrganizer {
         }
 
         // Shulker has 27 slots; player inventory starts at slot 27 in the handler
-        // Find next player inventory slot with the target item
+        // Find next player inventory slot with the target item (skip hotbar)
+        if (actionSlotIndex < HOTBAR_SIZE) actionSlotIndex = HOTBAR_SIZE;
         while (actionSlotIndex < 36) {
             /*? if >=26.1 {*//*
             ItemStack stack = mc.player.getInventory().getItem(actionSlotIndex);
@@ -1338,7 +1437,7 @@ public final class StashOrganizer {
         shulkerTicks = 0;
     }
 
-    // ── SHULKER_CLOSING — wait a tick after closing ─────────────────────
+    // SHULKER_CLOSING — wait a tick after closing
 
     /*? if >=26.1 {*//*
     private void tickShulkerClosing(Minecraft mc) {
@@ -1359,7 +1458,7 @@ public final class StashOrganizer {
         }
     }
 
-    // ── SHULKER_BREAKING — mine the placed shulker ──────────────────────
+    // SHULKER_BREAKING — mine the placed shulker
 
     /*? if >=26.1 {*//*
     private void tickShulkerBreaking(Minecraft mc) {
@@ -1438,7 +1537,7 @@ public final class StashOrganizer {
         /*?}*/
     }
 
-    // ── SHULKER_PICKUP — walk to drop and collect item entity ────────────
+    // SHULKER_PICKUP — walk to drop and collect item entity
 
     /*? if >=26.1 {*//*
     private void tickShulkerPickup(Minecraft mc) {
@@ -1597,7 +1696,7 @@ public final class StashOrganizer {
         }
     }
 
-    // ── SHULKER_STORE_DEPOSIT — deposit filled shulker into chest ───────
+    // SHULKER_STORE_DEPOSIT — deposit filled shulker into chest
 
     /*? if >=26.1 {*//*
     private void tickShulkerStoreDeposit(Minecraft mc) {
@@ -1626,7 +1725,8 @@ public final class StashOrganizer {
         int chestSlotCount = containerHandler.getRows() * 9;
         /*?}*/
 
-        // Deposit any shulker boxes from player inventory
+        // Deposit any shulker boxes from player inventory (skip hotbar)
+        if (actionSlotIndex < HOTBAR_SIZE) actionSlotIndex = HOTBAR_SIZE;
         while (actionSlotIndex < 36) {
             /*? if >=26.1 {*//*
             ItemStack stack = mc.player.getInventory().getItem(actionSlotIndex);
@@ -1697,9 +1797,7 @@ public final class StashOrganizer {
         }
     }
 
-    // ═══════════════════════════════════════════════════════════════════
-    //  SHULKER FETCH — walk to container, take an empty shulker, then pack
-    // ═══════════════════════════════════════════════════════════════════
+    // --- SHULKER FETCH — walk to container, take an empty shulker, then pack
 
     /*? if >=26.1 {*//*
     private void tickShulkerFetchOpen(Minecraft mc) {
@@ -1877,9 +1975,7 @@ public final class StashOrganizer {
         if (canCraftShulkers()) { startCrafting(); } else startOverflow();
     }
 
-    // ═══════════════════════════════════════════════════════════════════
-    //  CRAFTING — walk to crafting table → open → place materials → take
-    // ═══════════════════════════════════════════════════════════════════
+    // --- CRAFTING — walk to crafting table → open → place materials → take
 
     private void startCrafting() {
         /*? if >=26.1 {*//*
@@ -1964,7 +2060,7 @@ public final class StashOrganizer {
         openWaitTicks = 0;
     }
 
-    // ── CRAFT_MATERIAL_OPEN — open container to take shells/chests ─────
+    // CRAFT_MATERIAL_OPEN — open container to take shells/chests
 
     /*? if >=26.1 {*//*
     private void tickCraftMaterialOpen(Minecraft mc) {
@@ -2041,7 +2137,7 @@ public final class StashOrganizer {
         }
     }
 
-    // ── CRAFT_MATERIAL_TAKE — take shells and chests from container ──────
+    // CRAFT_MATERIAL_TAKE — take shells and chests from container
 
     /*? if >=26.1 {*//*
     private void tickCraftMaterialTake(Minecraft mc) {
@@ -2226,7 +2322,7 @@ public final class StashOrganizer {
         }
     }
 
-    // ── CRAFT_PLACING — place materials in crafting grid ────────────────
+    // CRAFT_PLACING — place materials in crafting grid
 
     /*? if >=26.1 {*//*
     private void tickCraftPlacing(Minecraft mc) {
@@ -2372,7 +2468,7 @@ public final class StashOrganizer {
         actionCooldown = CLICK_COOLDOWN_TICKS;
     }
 
-    // ── CRAFT_TAKING — take crafted shulker from output slot ────────────
+    // CRAFT_TAKING — take crafted shulker from output slot
 
     /*? if >=26.1 {*//*
     private void tickCraftTaking(Minecraft mc) {
@@ -2452,9 +2548,7 @@ public final class StashOrganizer {
         }
     }
 
-    // ═══════════════════════════════════════════════════════════════════
-    //  OVERFLOW — deposit remaining items + export report
-    // ═══════════════════════════════════════════════════════════════════
+    // --- OVERFLOW — deposit remaining items + export report
 
     private void startOverflow() {
         /*? if >=26.1 {*//*
@@ -2602,7 +2696,8 @@ public final class StashOrganizer {
         int chestSlotCount = containerHandler.getRows() * 9;
         /*?}*/
 
-        // Deposit everything possible from inventory
+        // Deposit everything possible from inventory (skip hotbar)
+        if (actionSlotIndex < HOTBAR_SIZE) actionSlotIndex = HOTBAR_SIZE;
         while (actionSlotIndex < 36) {
             /*? if >=26.1 {*//*
             ItemStack stack = mc.player.getInventory().getItem(actionSlotIndex);
@@ -2657,7 +2752,7 @@ public final class StashOrganizer {
         advanceToNextTask();
     }
 
-    // ── Consolidation helpers ───────────────────────────────────────────
+    // Consolidation helpers
 
     /** Advance the consolidation phase: prepare shulker → collect → pack → store. */
     private void advanceConsolidation() {
@@ -2699,10 +2794,21 @@ public final class StashOrganizer {
                 startCrafting();
                 return;
             }
-            // Can't get shulkers — can't consolidate
-            ChatHelper.labelled("Organize", "§eNo shulkers available for consolidation.");
+            // Can't get shulkers — fall back to organizing loose items into chests
+            ChatHelper.labelled("Organize", "§eNo shulkers available — moving loose items to chests instead.");
+            while (!consolidationQueue.isEmpty()) {
+                MoveTask task = consolidationQueue.poll();
+                if (!task.source().equals(task.destination())) {
+                    taskQueue.add(task);
+                }
+            }
             consolidationMode = false;
-            finishOrganization();
+            if (!taskQueue.isEmpty()) {
+                totalTasks += taskQueue.size();
+                advanceToNextTask();
+            } else {
+                finishOrganization();
+            }
             return;
         }
 
@@ -2745,7 +2851,7 @@ public final class StashOrganizer {
         if (currentTask != null) consolidationTypes.add(currentTask.itemId());
         if (packItemId != null) consolidationTypes.add(packItemId);
 
-        for (int i = 0; i < 36; i++) {
+        for (int i = HOTBAR_SIZE; i < 36; i++) {
             /*? if >=26.1 {*//*
             ItemStack stack = player.getInventory().getItem(i);
             *//*?} else {*/
@@ -2760,7 +2866,7 @@ public final class StashOrganizer {
         return false;
     }
 
-    // ── Navigation helpers ──────────────────────────────────────────────
+    // Navigation helpers
 
     private void transitionToDestination() {
         if (currentTask == null) {
@@ -2780,7 +2886,7 @@ public final class StashOrganizer {
                 // Switch to consolidation phase
                 consolidationMode = true;
                 ChatHelper.labelled("Organize",
-                        "§7Starting consolidation — packing misc items into shulkers...");
+                        "§7Starting condensing — packing loose items into shulker boxes...");
                 advanceConsolidation();
                 return;
             }
@@ -2797,6 +2903,7 @@ public final class StashOrganizer {
     }
 
     private void finishOrganization() {
+        PathWalker.stop();
         state = State.DONE;
         ChatHelper.labelled("Organize", "§aOrganization complete! §f"
                 + completedTasks + "§a moves executed.");
@@ -2813,7 +2920,7 @@ public final class StashOrganizer {
         ChatHelper.labelled("Organize", "§7Run §f/stash scan §7to refresh the index.");
     }
 
-    // ── Look helper ─────────────────────────────────────────────────────
+    // Look helper
 
     /*? if >=26.1 {*//*
     private static void lookAt(LocalPlayer player, Vec3 target) {
@@ -2848,7 +2955,7 @@ public final class StashOrganizer {
         /*?}*/
     }
 
-    // ── Region filtering ────────────────────────────────────────────────
+    // Region filtering
 
     private Map<BlockPos, ContainerEntry> getRegionContainers() {
         BlockPos c1 = stashManager.getCorner1();
@@ -2872,14 +2979,14 @@ public final class StashOrganizer {
         return result;
     }
 
-    // ── Inventory helpers ───────────────────────────────────────────────
+    // Inventory helpers
 
     /*? if >=26.1 {*//*
     private boolean hasInventoryRoom(LocalPlayer player) {
     *//*?} else {*/
     private boolean hasInventoryRoom(ClientPlayerEntity player) {
     /*?}*/
-        for (int i = 0; i < 36; i++) {
+        for (int i = HOTBAR_SIZE; i < 36; i++) {
             /*? if >=26.1 {*//*
             if (player.getInventory().getItem(i).isEmpty()) return true;
             *//*?} else {*/
@@ -2930,7 +3037,7 @@ public final class StashOrganizer {
     *//*?} else {*/
     private int findEmptyShulkerInInventory(ClientPlayerEntity player) {
     /*?}*/
-        for (int i = 0; i < 36; i++) {
+        for (int i = HOTBAR_SIZE; i < 36; i++) {
             /*? if >=26.1 {*//*
             ItemStack stack = player.getInventory().getItem(i);
             *//*?} else {*/
@@ -2977,7 +3084,7 @@ public final class StashOrganizer {
     private int countItemInInventory(ClientPlayerEntity player, String itemId) {
     /*?}*/
         int count = 0;
-        for (int i = 0; i < 36; i++) {
+        for (int i = HOTBAR_SIZE; i < 36; i++) {
             /*? if >=26.1 {*//*
             ItemStack stack = player.getInventory().getItem(i);
             *//*?} else {*/
@@ -3068,7 +3175,7 @@ public final class StashOrganizer {
         }
     }
 
-    // ── World helpers ───────────────────────────────────────────────────
+    // World helpers
 
     /*? if >=26.1 {*//*
     private BlockPos findShulkerPlaceSpot(LocalPlayer player, Level world) {
@@ -3203,7 +3310,7 @@ public final class StashOrganizer {
         return region.isEmpty() ? null : region.keySet().iterator().next();
     }
 
-    // ── Overflow report ─────────────────────────────────────────────────
+    // Overflow report
 
     /*? if >=26.1 {*//*
     private void recordOverflowFromInventory(LocalPlayer player) {
@@ -3251,7 +3358,7 @@ public final class StashOrganizer {
         }
     }
 
-    // ── Item type helpers ───────────────────────────────────────────────
+    // Item type helpers
 
     private static boolean isShulkerBoxItem(String itemId) {
         return itemId.contains("shulker_box");
@@ -3267,7 +3374,23 @@ public final class StashOrganizer {
         return true;
     }
 
-    // ── Status ──────────────────────────────────────────────────────────
+    // Return the dominant item type in a shulker's contents, or null if empty.
+    private static String getPrimaryContent(Map<String, Integer> contents) {
+        if (contents == null || contents.isEmpty()) return null;
+        return contents.entrySet().stream()
+                .max(Map.Entry.comparingByValue())
+                .map(Map.Entry::getKey)
+                .orElse(null);
+    }
+
+    // Check if a chest slot's shulker box has the given primary content.
+    private static boolean shulkerMatchesContent(ItemStack stack, String contentFilter) {
+        if (!ChestManager.isShulkerBox(stack)) return false;
+        Map<String, Integer> contents = ItemIdentifier.readShulkerContents(stack);
+        return contentFilter.equals(getPrimaryContent(contents));
+    }
+
+    // Status
 
     public String getStatus() {
         String detail = switch (state) {
