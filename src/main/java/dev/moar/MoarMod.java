@@ -126,6 +126,11 @@ public class MoarMod implements ClientModInitializer {
             STASH_MANAGER.tick();
         });
 
+        // Restart API server when joining a server/world
+        ClientPlayConnectionEvents.JOIN.register((handler, sender, client) -> {
+            if (API_SERVER != null) API_SERVER.start();
+        });
+
         // Clean up all state when leaving a server/world
         ClientPlayConnectionEvents.DISCONNECT.register((handler, client) -> {
             PRINTER.onDisconnect();

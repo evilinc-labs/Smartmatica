@@ -65,8 +65,8 @@ public final class ApiHandler {
         if (!checkGet(ex)) return;
 
         Map<String, String> params = parseQuery(ex.getRequestURI());
-        int page = intParam(params, "page", 1);
-        int size = Math.min(intParam(params, "size", 50), 200);
+        int page = Math.max(1, intParam(params, "page", 1));
+        int size = Math.max(1, Math.min(intParam(params, "size", 50), 200));
 
         var allEntries = new ArrayList<>(stash().getIndex().values());
         int totalCount = allEntries.size();

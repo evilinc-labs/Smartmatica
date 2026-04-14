@@ -34,6 +34,8 @@ Scan, index, and organize containers across large areas.
 - **Waypoint walking** — navigates between zones for areas beyond render distance
 - **CSV export** — exports the full inventory index to file
 - **Dump chests** — designate chests for depositing mined items during area clearing
+- **REST API** — embedded HTTP server with Prometheus metrics for Grafana dashboards
+- **Webhook** — POST JSON to n8n or other services on scan completion
 
 ## Supported Versions
 
@@ -128,6 +130,43 @@ All versions require [Fabric Loader](https://fabricmc.net/use/) ≥ 0.18.4.
 | `/stash dump remove` | Unmark the nearest dump chest |
 | `/stash dump list` | List all dump chests |
 | `/stash dump clear` | Remove all dump chests |
+
+### API & Monitoring
+
+MOAR includes an embedded HTTP API for Grafana dashboards, Prometheus scraping, and n8n webhook integrations. All settings live in `config/moar/moar.properties` (auto-created on first launch).
+
+#### Configuration (`config/moar/moar.properties`)
+
+```properties
+# Enable the embedded API server
+api.enabled=false
+# Bind address (use 0.0.0.0 to expose externally)
+api.bind=127.0.0.1
+# HTTP port
+api.port=8585
+# Bearer token for auth (leave blank to disable auth)
+api.key=
+# POST JSON to this URL on scan completion (n8n, etc.)
+webhook.url=
+```
+
+#### REST Endpoints
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/v1/status` | GET | Scanner state, index size, region info |
+| `/api/v1/containers?page=1&size=50` | GET | Paginated container list |
+| `/api/v1/search?item=diamond` | GET | Find containers holding an item |
+| `/api/v1/stats` | GET | Aggregate statistics (JSON) |
+| `/api/v1/metrics` | GET | Prometheus-format metrics |
+| `/api/v1/organizer` | GET | Organizer state and progress |
+| `/api/v1/webhook/test` | POST | Webhook connectivity test |
+
+All endpoints accept `Authorization: Bearer <api.key>` when `api.key` is set.
+
+#### Grafana Setup
+
+See [docs/grafana-setup.md](docs/grafana-setup.md) for a step-by-step guide to connect Prometheus + Grafana dashboards via Docker Compose.
 
 ### Keybinds
 
