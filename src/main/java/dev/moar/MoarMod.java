@@ -1,5 +1,7 @@
 package dev.moar;
 
+import dev.moar.api.ApiServer;
+import dev.moar.api.MoarProperties;
 import dev.moar.chest.ChestManager;
 import dev.moar.command.PrinterCommand;
 import dev.moar.command.SpawnProofCommand;
@@ -52,6 +54,8 @@ public class MoarMod implements ClientModInitializer {
     private static final SpawnProofer SPAWN_PROOFER = new SpawnProofer();
     private static final ChestManager CHEST_MANAGER = new ChestManager();
     private static final StashManager STASH_MANAGER = new StashManager();
+    private static MoarProperties PROPERTIES;
+    private static ApiServer API_SERVER;
 
     /*? if >=26.1 {*//*
     private static KeyMapping toggleKey;
@@ -93,6 +97,11 @@ public class MoarMod implements ClientModInitializer {
         // Load saved supply chest positions
         PrinterResourceManager.load();
 
+        // Load properties and start API server if enabled
+        PROPERTIES = MoarProperties.load();
+        API_SERVER = new ApiServer(PROPERTIES);
+        API_SERVER.start();
+
         // Register tick handler
         ClientTickEvents.END_CLIENT_TICK.register(client -> {
             // Toggle keybind check
@@ -126,6 +135,7 @@ public class MoarMod implements ClientModInitializer {
             PathWalker.stop();
             PrinterDatabase.clearScaffold();
             DATABASE.close();
+            if (API_SERVER != null) API_SERVER.close();
         });
 
         LOGGER.info("MOAR initialized.");
@@ -154,5 +164,15 @@ public class MoarMod implements ClientModInitializer {
     /** Get the shared SQLite database. */
     public static StashDatabase getDatabase() {
         return DATABASE;
+    }
+
+    /** Get the loaded API/webhook properties. */
+    public static MoarProperties getProperties() {
+        return PROPERTIES;
+    }
+
+    /** Get the embedded API server. */
+    public static ApiServer getApiServer() {
+        return API_SERVER;
     }
 }

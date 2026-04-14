@@ -248,6 +248,9 @@ public final class StashManager {
 
     public int getIndexedCount() { return index.size(); }
     public int getRemainingCount() { return scanQueue.size(); }
+    public int getTotalFound() { return totalFound; }
+    public int getTotalIndexed() { return totalIndexed; }
+    public int getTotalSkipped() { return totalSkipped; }
 
     // Lifecycle
 
@@ -910,6 +913,12 @@ public final class StashManager {
                 + "§7 items, §f" + totalTypes
                 + "§7 types, §f" + totalShulkers + "§7 shulker boxes inspected.");
         ChatHelper.labelled("Stash", "§7Use §f/stash export§7 to save CSV report.");
+
+        // Fire webhook notification if configured
+        var props = MoarMod.getProperties();
+        if (props != null) {
+            dev.moar.api.ApiHandler.fireScanComplete(props, this);
+        }
     }
 
     // Region helpers
