@@ -67,6 +67,31 @@ import net.minecraft.world.phys.Vec3;
 *//*?} else {*/
 import net.minecraft.util.math.Vec3d;
 /*?}*/
+/*? if >=26.1 {*//*
+import net.minecraft.world.level.block.ShulkerBoxBlock;
+*//*?} else {*/
+import net.minecraft.block.ShulkerBoxBlock;
+/*?}*/
+/*? if >=26.1 {*//*
+import net.minecraft.world.level.block.state.BlockState;
+*//*?} else {*/
+import net.minecraft.block.BlockState;
+/*?}*/
+/*? if >=26.1 {*//*
+import net.minecraft.world.level.Level;
+*//*?} else {*/
+import net.minecraft.world.World;
+/*?}*/
+/*? if >=26.1 {*//*
+import net.minecraft.world.entity.player.Inventory;
+*//*?} else {*/
+import net.minecraft.entity.player.PlayerInventory;
+/*?}*/
+/*? if >=26.1 {*//*
+import net.minecraft.world.inventory.ShulkerBoxMenu;
+*//*?} else {*/
+import net.minecraft.screen.ShulkerBoxScreenHandler;
+/*?}*/
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -88,9 +113,11 @@ public final class StashRetriever {
 
     private static final int OPEN_TIMEOUT_TICKS = 60;
     private static final int CLICK_COOLDOWN_TICKS = 3;
+    private static final int CHEST_SYNC_DELAY = 3;
+    private static final int OPEN_RETRY_INTERVAL_TICKS = 8;
     private static final int HOTBAR_SIZE = 9;
 
-    public enum State { IDLE, WALKING, OPENING, TAKING }
+    public enum State { IDLE, WALKING, OPENING, TAKING, UNLOADING_SHULKER }
 
     private State state = State.IDLE;
 
@@ -106,8 +133,26 @@ public final class StashRetriever {
     private final Deque<BlockPos> containerQueue = new ArrayDeque<>();
     private BlockPos walkTarget;
     private int openWaitTicks;
+    private int syncTicks;
     private int actionSlotIndex;
     private int actionCooldown;
+
+    // Shulker unloading
+    private static final int MAX_SHULKER_FAILURES = 3;
+    private static final int SHULKER_PHASE_TIMEOUT = 80;
+    private static final int SHULKER_PICKUP_DELAY = 10;
+    private static final int SHULKER_TOTAL_TIMEOUT = 600;
+    private static final int SHULKER_SETTLE_DELAY = 4;
+    private static final int MAX_SHULKER_OPEN_RETRIES = 2;
+    private int shulkerPhase;
+    private int shulkerTicks;
+    private int shulkerTotalTicks;
+    private BlockPos shulkerPos;
+    private int shulkerSlot = -1;
+    private float savedYaw, savedPitch;
+    private int shulkerFailures;
+    private int shulkerOpenRetries;
+    private Runnable shulkerSneakRestore;
 
     // Public API
 
@@ -290,9 +335,10 @@ public final class StashRetriever {
         /*?}*/
 
         switch (state) {
-            case WALKING -> tickWalking(mc);
-            case OPENING -> tickOpening(mc);
-            case TAKING  -> tickTaking(mc);
+            case WALKING          -> tickWalking(mc);
+            case OPENING          -> tickOpening(mc);
+            case TAKING           -> tickTaking(mc);
+            case UNLOADING_SHULKER -> tickUnloadingShulker(mc);
         }
     }
 
@@ -362,6 +408,7 @@ public final class StashRetriever {
         /*?}*/
             actionSlotIndex = 0;
             actionCooldown = 0;
+            syncTicks = 0;
             state = State.TAKING;
             return;
         }
@@ -380,7 +427,8 @@ public final class StashRetriever {
             /*?}*/
         }
 
-        if (openWaitTicks == 3) {
+        if (openWaitTicks >= 3
+            && (openWaitTicks == 3 || openWaitTicks % OPEN_RETRY_INTERVAL_TICKS == 0)) {
             Runnable restoreSneak = PlacementEngine.releaseForInteraction(player);
 
             /*? if >=26.1 {*//*
@@ -430,6 +478,10 @@ public final class StashRetriever {
     /*?}*/
         if (actionCooldown > 0) { actionCooldown--; return; }
 
+        // Wait for server to sync slot contents
+        syncTicks++;
+        if (syncTicks <= CHEST_SYNC_DELAY) return;
+
         // Check if we've taken enough
         if (isDone()) {
             /*? if >=26.1 {*//*
@@ -469,20 +521,21 @@ public final class StashRetriever {
             /*?}*/
             if (!stack.isEmpty()) {
                 String itemId = ItemIdentifier.getItemId(stack);
-                boolean wanted = isWanted(itemId);
+                boolean wantedDirectly = isWanted(itemId);
+                boolean wantedForContents = false;
 
-                // If not directly wanted, check if it's a shulker containing wanted items
-                if (!wanted && ChestManager.isShulkerBox(stack)) {
+                // Check if a shulker contains wanted items
+                if (!wantedDirectly && ChestManager.isShulkerBox(stack)) {
                     Map<String, Integer> contents = ItemIdentifier.readShulkerContents(stack);
                     for (String innerItem : contents.keySet()) {
                         if (isWanted(innerItem)) {
-                            wanted = true;
+                            wantedForContents = true;
                             break;
                         }
                     }
                 }
 
-                if (wanted) {
+                if (wantedDirectly || wantedForContents) {
                     if (!hasInventoryRoom(mc.player)) {
                         ChatHelper.labelled("Stash", "§eInventory full.");
                         /*? if >=26.1 {*//*
@@ -514,17 +567,27 @@ public final class StashRetriever {
                             mc.player
                     );
 
-                    // If we took a shulker, count the inner contents toward fulfillment
-                    if (ChestManager.isShulkerBox(stack)) {
-                        Map<String, Integer> contents = ItemIdentifier.readShulkerContents(stack);
-                        for (var e : contents.entrySet()) {
-                            if (isWanted(e.getKey())) {
-                                recordTaken(e.getKey(), e.getValue());
-                            }
+                    if (wantedForContents) {
+                        // Took a shulker for its contents — close chest and
+                        // enter shulker unloading to extract items.
+                        /*? if >=26.1 {*//*
+                        mc.player.clientSideCloseContainer();
+                        *//*?} else {*/
+                        mc.player.closeHandledScreen();
+                        /*?}*/
+                        // Re-queue this container so we revisit it afterward
+                        if (walkTarget != null) {
+                            ((ArrayDeque<BlockPos>) containerQueue).addFirst(walkTarget);
                         }
-                    } else {
-                        recordTaken(itemId, stack.getCount());
+                        shulkerPhase = 0;
+                        shulkerTicks = 0;
+                        shulkerTotalTicks = 0;
+                        shulkerFailures = 0;
+                        state = State.UNLOADING_SHULKER;
+                        return;
                     }
+
+                    recordTaken(itemId, stack.getCount());
 
                     actionSlotIndex++;
                     actionCooldown = CLICK_COOLDOWN_TICKS;
@@ -623,6 +686,532 @@ public final class StashRetriever {
             /*?}*/
         }
         return false;
+    }
+
+    // Shulker unloading state machine
+
+    /*? if >=26.1 {*//*
+    private void tickUnloadingShulker(Minecraft mc) {
+    *//*?} else {*/
+    private void tickUnloadingShulker(MinecraftClient mc) {
+    /*?}*/
+        /*? if >=26.1 {*//*
+        if (mc.player == null || mc.level == null || mc.gameMode == null) return;
+        *//*?} else {*/
+        if (mc.player == null || mc.world == null || mc.interactionManager == null) return;
+        /*?}*/
+        /*? if >=26.1 {*//*
+        LocalPlayer player = mc.player;
+        *//*?} else {*/
+        ClientPlayerEntity player = mc.player;
+        /*?}*/
+        /*? if >=26.1 {*//*
+        Level world = mc.level;
+        *//*?} else {*/
+        World world = mc.world;
+        /*?}*/
+
+        shulkerTicks++;
+        shulkerTotalTicks++;
+
+        if (shulkerTotalTicks >= SHULKER_TOTAL_TIMEOUT) {
+            ChatHelper.labelled("Stash", "§cShulker unloading timed out.");
+            /*? if >=26.1 {*//*
+            if (mc.screen != null) player.clientSideCloseContainer();
+            *//*?} else {*/
+            if (mc.currentScreen != null) player.closeHandledScreen();
+            /*?}*/
+            /*? if >=26.1 {*//*
+            mc.gameMode.stopDestroyBlock();
+            *//*?} else {*/
+            mc.interactionManager.cancelBlockBreaking();
+            /*?}*/
+            finishShulkerUnloading();
+            return;
+        }
+
+        switch (shulkerPhase) {
+
+            // Phase 0: Find shulker in inventory with needed items
+            case 0 -> {
+                // Give server a few ticks after chest close/setback before placement.
+                if (shulkerTicks < SHULKER_SETTLE_DELAY) return;
+                if (shulkerFailures >= MAX_SHULKER_FAILURES) {
+                    ChatHelper.labelled("Stash", "§eShulker unloading failed too many times — skipping.");
+                    finishShulkerUnloading();
+                    return;
+                }
+                int slot = findShulkerWithNeededItems(player);
+                if (slot < 0) {
+                    finishShulkerUnloading();
+                    return;
+                }
+                shulkerSlot = slot;
+                shulkerPos = findShulkerPlaceSpot(player, world);
+                if (shulkerPos == null) {
+                    ChatHelper.labelled("Stash", "§eNo space to place shulker.");
+                    finishShulkerUnloading();
+                    return;
+                }
+                /*? if >=26.1 {*//*
+                savedYaw = player.getYRot();
+                *//*?} else {*/
+                savedYaw = player.getYaw();
+                /*?}*/
+                /*? if >=26.1 {*//*
+                savedPitch = player.getXRot();
+                *//*?} else {*/
+                savedPitch = player.getPitch();
+                /*?}*/
+                shulkerPhase = 1;
+                shulkerTicks = 0;
+                shulkerOpenRetries = 0;
+            }
+
+            // Phase 1: Move shulker to hotbar
+            case 1 -> {
+                /*? if >=26.1 {*//*
+                Inventory inv = player.getInventory();
+                *//*?} else {*/
+                PlayerInventory inv = player.getInventory();
+                /*?}*/
+                if (shulkerSlot >= 9) {
+                    /*? if >=26.1 {*//*
+                    mc.gameMode.handleContainerInput(
+                    *//*?} else {*/
+                    mc.interactionManager.clickSlot(
+                    /*?}*/
+                            /*? if >=26.1 {*//*
+                            player.containerMenu.containerId,
+                            *//*?} else {*/
+                            player.currentScreenHandler.syncId,
+                            /*?}*/
+                            shulkerSlot,
+                            /*? if >=1.21.5 {*//*
+                            inv.getSelectedSlot(),
+                            *//*?} else {*/
+                            inv.selectedSlot,
+                            /*?}*/
+                            /*? if >=26.1 {*//*
+                            ContainerInput.SWAP,
+                            *//*?} else {*/
+                            SlotActionType.SWAP,
+                            /*?}*/
+                            player
+                    );
+                } else {
+                    /*? if >=1.21.5 {*//*
+                    inv.setSelectedSlot(shulkerSlot);
+                    *//*?} else {*/
+                    inv.selectedSlot = shulkerSlot;
+                    /*?}*/
+                }
+                shulkerPhase = 2;
+                shulkerTicks = 0;
+            }
+
+            // Phase 2: Look at target and place with sneak
+            case 2 -> {
+                if (shulkerTicks < 2) return;
+
+                /*? if >=26.1 {*//*
+                Inventory inv = player.getInventory();
+                *//*?} else {*/
+                PlayerInventory inv = player.getInventory();
+                /*?}*/
+                /*? if >=26.1 {*//*
+                ItemStack held = inv.getItem(inv.getSelectedSlot());
+                *//*?} else if >=1.21.5 {*//*
+                ItemStack held = inv.getStack(inv.getSelectedSlot());
+                *//*?} else {*/
+                ItemStack held = inv.getStack(inv.selectedSlot);
+                /*?}*/
+                if (!ChestManager.isShulkerBox(held)) {
+                    shulkerFailures++;
+                    shulkerPhase = 0;
+                    shulkerTicks = 0;
+                    return;
+                }
+
+                /*? if >=26.1 {*//*
+                Vec3 target = Vec3.atCenterOf(shulkerPos.below()).add(0, 0.5, 0);
+                *//*?} else {*/
+                Vec3d target = Vec3d.ofCenter(shulkerPos.down()).add(0, 0.5, 0);
+                /*?}*/
+                // If a setback moved us out of reach, re-pick a placement spot.
+                /*? if >=26.1 {*//*
+                if (player.getEyePosition().distanceToSqr(target) > 4.5 * 4.5) {
+                *//*?} else {*/
+                if (player.getEyePos().squaredDistanceTo(target) > 4.5 * 4.5) {
+                /*?}*/
+                    shulkerPos = findShulkerPlaceSpot(player, world);
+                    if (shulkerPos == null) {
+                        shulkerFailures++;
+                        shulkerPhase = 0;
+                        shulkerTicks = 0;
+                        return;
+                    }
+                    shulkerTicks = 0;
+                    return;
+                }
+                lookAt(player, target);
+
+                if (shulkerTicks < 4) return;
+
+                Runnable restoreSneak = PlacementEngine.ensureSneakForPlacement(player);
+                BlockHitResult hit = new BlockHitResult(
+                        target, Direction.UP,
+                        /*? if >=26.1 {*//*
+                        shulkerPos.below(),
+                        *//*?} else {*/
+                        shulkerPos.down(),
+                        /*?}*/
+                        false);
+                /*? if >=26.1 {*//*
+                mc.gameMode.useItemOn(player, InteractionHand.MAIN_HAND, hit);
+                *//*?} else {*/
+                mc.interactionManager.interactBlock(player, Hand.MAIN_HAND, hit);
+                /*?}*/
+                // Keep sneak for one extra tick to avoid same-tick anti-cheat setbacks.
+                shulkerSneakRestore = restoreSneak;
+                shulkerPhase = 3;
+                shulkerTicks = 0;
+            }
+
+            // Phase 3: Wait for placement
+            case 3 -> {
+                if (shulkerSneakRestore != null && shulkerTicks >= 1) {
+                    shulkerSneakRestore.run();
+                    shulkerSneakRestore = null;
+                }
+                BlockState st = world.getBlockState(shulkerPos);
+                if (st.getBlock() instanceof ShulkerBoxBlock) {
+                    shulkerFailures = 0;
+                    shulkerPhase = 4;
+                    shulkerTicks = 0;
+                    return;
+                }
+                if (shulkerTicks >= SHULKER_PHASE_TIMEOUT) {
+                    shulkerFailures++;
+                    if (shulkerSneakRestore != null) {
+                        shulkerSneakRestore.run();
+                        shulkerSneakRestore = null;
+                    }
+                    shulkerPhase = 0;
+                    shulkerTicks = 0;
+                }
+            }
+
+            // Phase 4: Open the placed shulker
+            case 4 -> {
+                /*? if >=26.1 {*//*
+                Vec3 center = Vec3.atCenterOf(shulkerPos);
+                *//*?} else {*/
+                Vec3d center = Vec3d.ofCenter(shulkerPos);
+                /*?}*/
+                lookAt(player, center);
+                if (shulkerTicks < 3) return;
+
+                Runnable restoreSneak = PlacementEngine.releaseForInteraction(player);
+                /*? if >=26.1 {*//*
+                Vec3 toShulker = center.subtract(player.getEyePosition());
+                *//*?} else {*/
+                Vec3d toShulker = center.subtract(player.getEyePos());
+                /*?}*/
+                /*? if >=26.1 {*//*
+                Direction hitFace = Direction.getApproximateNearest(
+                *//*?} else {*/
+                Direction hitFace = Direction.getFacing(
+                /*?}*/
+                        (float) -toShulker.x, (float) -toShulker.y, (float) -toShulker.z);
+                /*? if >=26.1 {*//*
+                mc.gameMode.useItemOn(player, InteractionHand.MAIN_HAND,
+                *//*?} else {*/
+                mc.interactionManager.interactBlock(player, Hand.MAIN_HAND,
+                /*?}*/
+                        new BlockHitResult(center, hitFace, shulkerPos, false));
+                restoreSneak.run();
+                shulkerPhase = 5;
+                shulkerTicks = 0;
+            }
+
+            // Phase 5: Take needed items from shulker
+            case 5 -> {
+                /*? if >=26.1 {*//*
+                AbstractContainerMenu handler = player.containerMenu;
+                *//*?} else {*/
+                ScreenHandler handler = player.currentScreenHandler;
+                /*?}*/
+                /*? if >=26.1 {*//*
+                if (handler instanceof ShulkerBoxMenu shulkerHandler) {
+                *//*?} else {*/
+                if (handler instanceof ShulkerBoxScreenHandler shulkerHandler) {
+                /*?}*/
+                    if (shulkerTicks < 3) return; // sync delay
+
+                    for (int slot = 0; slot < 27; slot++) {
+                        /*? if >=26.1 {*//*
+                        ItemStack stack = shulkerHandler.getSlot(slot).getItem();
+                        *//*?} else {*/
+                        ItemStack stack = shulkerHandler.getSlot(slot).getStack();
+                        /*?}*/
+                        if (stack.isEmpty()) continue;
+                        String itemId = ItemIdentifier.getItemId(stack);
+                        if (!isWanted(itemId)) continue;
+                        if (!hasInventoryRoom(player)) break;
+
+                        /*? if >=26.1 {*//*
+                        mc.gameMode.handleContainerInput(
+                        *//*?} else {*/
+                        mc.interactionManager.clickSlot(
+                        /*?}*/
+                                /*? if >=26.1 {*//*
+                                shulkerHandler.containerId, slot, 0,
+                                *//*?} else {*/
+                                shulkerHandler.syncId, slot, 0,
+                                /*?}*/
+                                /*? if >=26.1 {*//*
+                                ContainerInput.QUICK_MOVE, player);
+                                *//*?} else {*/
+                                SlotActionType.QUICK_MOVE, player);
+                                /*?}*/
+                        recordTaken(itemId, stack.getCount());
+                    }
+
+                    /*? if >=26.1 {*//*
+                    player.clientSideCloseContainer();
+                    *//*?} else {*/
+                    player.closeHandledScreen();
+                    /*?}*/
+                    shulkerOpenRetries = 0;
+                    shulkerPhase = 6;
+                    shulkerTicks = 0;
+                    return;
+                }
+
+                if (shulkerTicks >= SHULKER_PHASE_TIMEOUT) {
+                    if (shulkerOpenRetries < MAX_SHULKER_OPEN_RETRIES) {
+                        shulkerOpenRetries++;
+                        shulkerPhase = 4;
+                    } else {
+                        shulkerFailures++;
+                        shulkerOpenRetries = 0;
+                        shulkerPhase = 6;
+                    }
+                    shulkerTicks = 0;
+                }
+            }
+
+            // Phase 6: Start breaking the shulker
+            case 6 -> {
+                /*? if >=26.1 {*//*
+                if (mc.screen != null) { player.clientSideCloseContainer(); return; }
+                *//*?} else {*/
+                if (mc.currentScreen != null) { player.closeHandledScreen(); return; }
+                /*?}*/
+
+                BlockState st = world.getBlockState(shulkerPos);
+                if (!(st.getBlock() instanceof ShulkerBoxBlock)) {
+                    shulkerPhase = 8;
+                    shulkerTicks = 0;
+                    return;
+                }
+
+                PlacementEngine.selectBestTool(player, mc, st);
+
+                /*? if >=26.1 {*//*
+                lookAt(player, Vec3.atCenterOf(shulkerPos));
+                *//*?} else {*/
+                lookAt(player, Vec3d.ofCenter(shulkerPos));
+                /*?}*/
+                /*? if >=26.1 {*//*
+                mc.gameMode.continueDestroyBlock(shulkerPos, Direction.UP);
+                *//*?} else {*/
+                mc.interactionManager.updateBlockBreakingProgress(shulkerPos, Direction.UP);
+                /*?}*/
+                /*? if >=26.1 {*//*
+                player.swing(InteractionHand.MAIN_HAND);
+                *//*?} else {*/
+                player.swingHand(Hand.MAIN_HAND);
+                /*?}*/
+                shulkerPhase = 7;
+                shulkerTicks = 0;
+            }
+
+            // Phase 7: Continue breaking
+            case 7 -> {
+                BlockState st = world.getBlockState(shulkerPos);
+                if (!(st.getBlock() instanceof ShulkerBoxBlock)) {
+                    /*? if >=26.1 {*//*
+                    mc.gameMode.stopDestroyBlock();
+                    *//*?} else {*/
+                    mc.interactionManager.cancelBlockBreaking();
+                    /*?}*/
+                    /*? if >=26.1 {*//*
+                    player.setYRot(savedYaw);
+                    *//*?} else {*/
+                    player.setYaw(savedYaw);
+                    /*?}*/
+                    /*? if >=26.1 {*//*
+                    player.setXRot(savedPitch);
+                    *//*?} else {*/
+                    player.setPitch(savedPitch);
+                    /*?}*/
+                    shulkerPhase = 8;
+                    shulkerTicks = 0;
+                    return;
+                }
+
+                if (shulkerTicks >= SHULKER_PHASE_TIMEOUT) {
+                    /*? if >=26.1 {*//*
+                    mc.gameMode.stopDestroyBlock();
+                    *//*?} else {*/
+                    mc.interactionManager.cancelBlockBreaking();
+                    /*?}*/
+                    shulkerFailures++;
+                    finishShulkerUnloading();
+                    return;
+                }
+
+                /*? if >=26.1 {*//*
+                lookAt(player, Vec3.atCenterOf(shulkerPos));
+                *//*?} else {*/
+                lookAt(player, Vec3d.ofCenter(shulkerPos));
+                /*?}*/
+                /*? if >=26.1 {*//*
+                mc.gameMode.continueDestroyBlock(shulkerPos, Direction.UP);
+                *//*?} else {*/
+                mc.interactionManager.updateBlockBreakingProgress(shulkerPos, Direction.UP);
+                /*?}*/
+                /*? if >=26.1 {*//*
+                player.swing(InteractionHand.MAIN_HAND);
+                *//*?} else {*/
+                player.swingHand(Hand.MAIN_HAND);
+                /*?}*/
+            }
+
+            // Phase 8: Wait for pickup, then resume
+            case 8 -> {
+                if (shulkerTicks >= SHULKER_PICKUP_DELAY) {
+                    finishShulkerUnloading();
+                }
+            }
+        }
+    }
+
+    private void finishShulkerUnloading() {
+        if (shulkerSneakRestore != null) {
+            shulkerSneakRestore.run();
+            shulkerSneakRestore = null;
+        }
+        shulkerPhase = 0;
+        shulkerPos = null;
+        shulkerSlot = -1;
+        shulkerTotalTicks = 0;
+        shulkerFailures = 0;
+        shulkerOpenRetries = 0;
+        // Resume from container queue (current chest was re-queued)
+        advanceToNextContainer();
+    }
+
+    /** Find an inventory slot containing a shulker with items we still need. */
+    /*? if >=26.1 {*//*
+    private int findShulkerWithNeededItems(LocalPlayer player) {
+    *//*?} else {*/
+    private int findShulkerWithNeededItems(ClientPlayerEntity player) {
+    /*?}*/
+        for (int i = 0; i < 36; i++) {
+            /*? if >=26.1 {*//*
+            ItemStack stack = player.getInventory().getItem(i);
+            *//*?} else {*/
+            ItemStack stack = player.getInventory().getStack(i);
+            /*?}*/
+            if (ChestManager.isShulkerBox(stack)) {
+                Map<String, Integer> contents = ItemIdentifier.readShulkerContents(stack);
+                for (String item : contents.keySet()) {
+                    if (isWanted(item)) return i;
+                }
+            }
+        }
+        return -1;
+    }
+
+    /** Find a nearby air block with solid support and space above for shulker placement. */
+    /*? if >=26.1 {*//*
+    private BlockPos findShulkerPlaceSpot(LocalPlayer player, Level world) {
+    *//*?} else {*/
+    private BlockPos findShulkerPlaceSpot(ClientPlayerEntity player, World world) {
+    /*?}*/
+        /*? if >=26.1 {*//*
+        BlockPos playerFeet = player.blockPosition();
+        *//*?} else {*/
+        BlockPos playerFeet = player.getBlockPos();
+        /*?}*/
+        double px = player.getX(), py = player.getY(), pz = player.getZ();
+        BlockPos best = null;
+        double bestDist = Double.MAX_VALUE;
+        boolean bestIsInteractive = true;
+        for (int dx = -3; dx <= 3; dx++) {
+            for (int dz = -3; dz <= 3; dz++) {
+                for (int dy = -1; dy <= 1; dy++) {
+                    /*? if >=26.1 {*//*
+                    BlockPos pos = playerFeet.offset(dx, dy, dz);
+                    *//*?} else {*/
+                    BlockPos pos = playerFeet.add(dx, dy, dz);
+                    /*?}*/
+                    // Skip positions overlapping player AABB
+                    if (px - 0.3 < pos.getX() + 1 && px + 0.3 > pos.getX()
+                            && py < pos.getY() + 1 && py + 1.8 > pos.getY()
+                            && pz - 0.3 < pos.getZ() + 1 && pz + 0.3 > pos.getZ()) {
+                        continue;
+                    }
+                    BlockState blockState = world.getBlockState(pos);
+                    /*? if >=26.1 {*//*
+                    BlockState below = world.getBlockState(pos.below());
+                    *//*?} else {*/
+                    BlockState below = world.getBlockState(pos.down());
+                    /*?}*/
+                    /*? if >=26.1 {*//*
+                    BlockState above = world.getBlockState(pos.above());
+                    *//*?} else {*/
+                    BlockState above = world.getBlockState(pos.up());
+                    /*?}*/
+                    /*? if >=26.1 {*//*
+                    if ((blockState.isAir() || blockState.canBeReplaced())
+                    *//*?} else {*/
+                    if ((blockState.isAir() || blockState.isReplaceable())
+                    /*?}*/
+                            /*? if >=26.1 {*//*
+                            && !below.getCollisionShape(world, pos.below()).isEmpty()
+                            *//*?} else {*/
+                            && !below.getCollisionShape(world, pos.down()).isEmpty()
+                            /*?}*/
+                            /*? if >=26.1 {*//*
+                            && (above.isAir() || above.canBeReplaced())) {
+                            *//*?} else {*/
+                            && (above.isAir() || above.isReplaceable())) {
+                            /*?}*/
+                        /*? if >=26.1 {*//*
+                        double dist = player.getEyePosition().distanceToSqr(Vec3.atCenterOf(pos));
+                        *//*?} else {*/
+                        double dist = player.getEyePos().squaredDistanceTo(Vec3d.ofCenter(pos));
+                        /*?}*/
+                        if (dist > 4.5 * 4.5) continue;
+                        boolean interactive = PlacementEngine.isInteractive(below.getBlock());
+                        if (bestIsInteractive && !interactive) {
+                            best = pos;
+                            bestDist = dist;
+                            bestIsInteractive = false;
+                        } else if (interactive == bestIsInteractive && dist < bestDist) {
+                            best = pos;
+                            bestDist = dist;
+                            bestIsInteractive = interactive;
+                        }
+                    }
+                }
+            }
+        }
+        return best;
     }
 
     /*? if >=26.1 {*//*

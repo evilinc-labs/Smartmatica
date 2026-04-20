@@ -2108,6 +2108,7 @@ public class SchematicPrinter {
     /*?}*/
         double rangeSq = range * range;
         int maxReach = (int) Math.ceil(range);
+        Set<BlockPos> protectedStorage = getProtectedStoragePositions();
 
         /*? if >=26.1 {*//*
         BlockPos playerPos = player.blockPosition();
@@ -2153,6 +2154,7 @@ public class SchematicPrinter {
                     BlockState existing = world.getBlockState(mutablePos);
 
                     if (isEffectivelyPlaced(existing, target)) continue;
+                    if (isStorageBlacklistedForClearing(existing, mutablePos, protectedStorage)) continue;
                     if (existing.isAir()) continue;
                     /*? if >=26.1 {*//*
                     if (existing.canBeReplaced()) continue;
@@ -2250,6 +2252,7 @@ public class SchematicPrinter {
     private BlockPos findNextClearTarget(ClientPlayerEntity player, World world) {
     /*?}*/
         if (player == null || world == null || schematic == null || anchor == null) return null;
+        Set<BlockPos> protectedStorage = getProtectedStoragePositions();
 
         /*? if >=26.1 {*//*
         Vec3 playerPos = player.position();
@@ -2287,6 +2290,7 @@ public class SchematicPrinter {
                         BlockState existing = world.getBlockState(mutablePos);
 
                         if (isEffectivelyPlaced(existing, target)) continue;
+                        if (isStorageBlacklistedForClearing(existing, mutablePos, protectedStorage)) continue;
                         if (existing.isAir()) continue;
                         /*? if >=26.1 {*//*
                         if (existing.canBeReplaced()) continue;
@@ -2342,6 +2346,17 @@ public class SchematicPrinter {
         // Continue breaking current target
         if (clearBreakTarget != null) {
             BlockState current = world.getBlockState(clearBreakTarget);
+            if (isStorageBlacklistedForClearing(current, clearBreakTarget, getProtectedStoragePositions())) {
+                // Storage/container blacklist always wins: cancel this target.
+                /*? if >=26.1 {*//*
+                mc.gameMode.stopDestroyBlock();
+                *//*?} else {*/
+                mc.interactionManager.cancelBlockBreaking();
+                /*?}*/
+                clearBreakTarget = null;
+                clearBreakTicks = 0;
+                return;
+            }
             /*? if >=26.1 {*//*
             if (current.isAir() || current.canBeReplaced()) {
             *//*?} else {*/
@@ -3363,6 +3378,27 @@ public class SchematicPrinter {
             }
         }
         return best;
+    }
+
+    private Set<BlockPos> getProtectedStoragePositions() {
+        Set<BlockPos> out = new HashSet<>();
+        out.addAll(MoarMod.getChestManager().getSupplyPositions());
+        out.addAll(MoarMod.getChestManager().getDumpPositions());
+        out.addAll(MoarMod.getChestManager().getStorageChests());
+        return out;
+    }
+
+    /*? if >=26.1 {*//*
+    private boolean isStorageBlacklistedForClearing(BlockState state, BlockPos pos, Set<BlockPos> protectedStorage) {
+    *//*?} else {*/
+    private boolean isStorageBlacklistedForClearing(BlockState state, BlockPos pos, Set<BlockPos> protectedStorage) {
+    /*?}*/
+        if (protectedStorage.contains(pos)) return true;
+        Block b = state.getBlock();
+        return b instanceof AbstractChestBlock
+                || b instanceof BarrelBlock
+                || b instanceof ShulkerBoxBlock
+                || b instanceof HopperBlock;
     }
 
     /**

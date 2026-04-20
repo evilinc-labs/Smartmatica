@@ -86,6 +86,32 @@ public final class StashCommand {
         return builder.buildFuture();
     };
 
+    /** Suggests saved kit names from the stash database. */
+    private static final SuggestionProvider<FabricClientCommandSource> SUGGEST_KITS = (ctx, builder) -> {
+        StashDatabase db = MoarMod.getDatabase();
+        if (db == null) return builder.buildFuture();
+        String remaining = builder.getRemaining().toLowerCase(java.util.Locale.ROOT);
+        for (String name : db.listKits()) {
+            if (name.toLowerCase(java.util.Locale.ROOT).startsWith(remaining)) {
+                builder.suggest(name);
+            }
+        }
+        return builder.buildFuture();
+    };
+
+    /** Suggests saved region profile names from the stash database. */
+    private static final SuggestionProvider<FabricClientCommandSource> SUGGEST_REGIONS = (ctx, builder) -> {
+        StashDatabase db = MoarMod.getDatabase();
+        if (db == null) return builder.buildFuture();
+        String remaining = builder.getRemaining().toLowerCase(java.util.Locale.ROOT);
+        for (String name : db.listRegions()) {
+            if (name.toLowerCase(java.util.Locale.ROOT).startsWith(remaining)) {
+                builder.suggest(name);
+            }
+        }
+        return builder.buildFuture();
+    };
+
     public static void register() {
         ClientCommandRegistrationCallback.EVENT.register((dispatcher, registryAccess) -> {
             /*? if >=26.1 {*//*
@@ -623,9 +649,11 @@ public final class StashCommand {
         /*? if >=26.1 {*//*
         kit.then(ClientCommands.literal("snapshot")
                 .then(ClientCommands.argument("name", StringArgumentType.word())
+                .suggests(SUGGEST_KITS)
         *//*?} else {*/
         kit.then(ClientCommandManager.literal("snapshot")
                 .then(ClientCommandManager.argument("name", StringArgumentType.word())
+                .suggests(SUGGEST_KITS)
         /*?}*/
                         .executes(ctx -> {
                             String name = StringArgumentType.getString(ctx, "name");
@@ -679,11 +707,13 @@ public final class StashCommand {
         /*? if >=26.1 {*//*
         kit.then(ClientCommands.literal("add")
                 .then(ClientCommands.argument("name", StringArgumentType.word())
+                .suggests(SUGGEST_KITS)
                         .then(ClientCommands.argument("item", StringArgumentType.word())
                                 .suggests(SUGGEST_ITEMS)
         *//*?} else {*/
         kit.then(ClientCommandManager.literal("add")
                 .then(ClientCommandManager.argument("name", StringArgumentType.word())
+                .suggests(SUGGEST_KITS)
                         .then(ClientCommandManager.argument("item", StringArgumentType.word())
                                 .suggests(SUGGEST_ITEMS)
         /*?}*/
@@ -708,11 +738,13 @@ public final class StashCommand {
         /*? if >=26.1 {*//*
         kit.then(ClientCommands.literal("remove")
                 .then(ClientCommands.argument("name", StringArgumentType.word())
+                .suggests(SUGGEST_KITS)
                         .then(ClientCommands.argument("item", StringArgumentType.word())
                                 .suggests(SUGGEST_ITEMS)
         *//*?} else {*/
         kit.then(ClientCommandManager.literal("remove")
                 .then(ClientCommandManager.argument("name", StringArgumentType.word())
+                .suggests(SUGGEST_KITS)
                         .then(ClientCommandManager.argument("item", StringArgumentType.word())
                                 .suggests(SUGGEST_ITEMS)
         /*?}*/
@@ -743,9 +775,11 @@ public final class StashCommand {
         /*? if >=26.1 {*//*
         kit.then(ClientCommands.literal("show")
                 .then(ClientCommands.argument("name", StringArgumentType.word())
+                .suggests(SUGGEST_KITS)
         *//*?} else {*/
         kit.then(ClientCommandManager.literal("show")
                 .then(ClientCommandManager.argument("name", StringArgumentType.word())
+                .suggests(SUGGEST_KITS)
         /*?}*/
                         .executes(ctx -> {
                             String name = StringArgumentType.getString(ctx, "name");
@@ -821,9 +855,11 @@ public final class StashCommand {
         /*? if >=26.1 {*//*
         kit.then(ClientCommands.literal("delete")
                 .then(ClientCommands.argument("name", StringArgumentType.word())
+                .suggests(SUGGEST_KITS)
         *//*?} else {*/
         kit.then(ClientCommandManager.literal("delete")
                 .then(ClientCommandManager.argument("name", StringArgumentType.word())
+                .suggests(SUGGEST_KITS)
         /*?}*/
                         .executes(ctx -> {
                             String name = StringArgumentType.getString(ctx, "name");
@@ -847,9 +883,11 @@ public final class StashCommand {
         /*? if >=26.1 {*//*
         kit.then(ClientCommands.literal("load")
                 .then(ClientCommands.argument("name", StringArgumentType.word())
+                .suggests(SUGGEST_KITS)
         *//*?} else {*/
         kit.then(ClientCommandManager.literal("load")
                 .then(ClientCommandManager.argument("name", StringArgumentType.word())
+                .suggests(SUGGEST_KITS)
         /*?}*/
                         .executes(ctx -> {
                             String name = StringArgumentType.getString(ctx, "name");
@@ -1002,9 +1040,11 @@ public final class StashCommand {
         /*? if >=26.1 {*//*
         region.then(ClientCommands.literal("load")
                 .then(ClientCommands.argument("name", StringArgumentType.word())
+                .suggests(SUGGEST_REGIONS)
         *//*?} else {*/
         region.then(ClientCommandManager.literal("load")
                 .then(ClientCommandManager.argument("name", StringArgumentType.word())
+                .suggests(SUGGEST_REGIONS)
         /*?}*/
                         .executes(ctx -> {
                             String name = StringArgumentType.getString(ctx, "name");
@@ -1063,9 +1103,11 @@ public final class StashCommand {
         /*? if >=26.1 {*//*
         region.then(ClientCommands.literal("delete")
                 .then(ClientCommands.argument("name", StringArgumentType.word())
+                .suggests(SUGGEST_REGIONS)
         *//*?} else {*/
         region.then(ClientCommandManager.literal("delete")
                 .then(ClientCommandManager.argument("name", StringArgumentType.word())
+                .suggests(SUGGEST_REGIONS)
         /*?}*/
                         .executes(ctx -> {
                             String name = StringArgumentType.getString(ctx, "name");

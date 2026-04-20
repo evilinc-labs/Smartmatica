@@ -409,7 +409,7 @@ public final class BlockDependency {
         *//*?} else {*/
         if (block instanceof AbstractPressurePlateBlock) return true;
         /*?}*/
-        /*? if >=26.1 {*//*
+        /*? if >=26.1 {*//*`1
         if (block instanceof TripWireHookBlock) return true;
         if (block instanceof TripWireBlock) return true;
         *//*?} else {*/

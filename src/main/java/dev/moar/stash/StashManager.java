@@ -418,6 +418,7 @@ public final class StashManager {
         World world = mc.world;
         /*?}*/
         List<BlockPos> containers = new ArrayList<>();
+        Set<BlockPos> blacklisted = getBlacklistedContainerPositions();
 
         int minCX = regionMin.getX() >> 4;
         int maxCX = regionMax.getX() >> 4;
@@ -452,9 +453,29 @@ public final class StashManager {
                             if (isContainer(block)) {
                                 if (block instanceof ChestBlock) {
                                     BlockPos partner = getDoubleChestPartner(pos, blockState);
+                                    // Skip full double chest if either side is blacklisted.
+                                    if (partner != null
+                                            && (blacklisted.contains(pos) || blacklisted.contains(partner))) {
+                                        /*? if >=26.1 {*//*
+                                        visitedPositions.add(pos.immutable());
+                                        visitedPositions.add(partner.immutable());
+                                        *//*?} else {*/
+                                        visitedPositions.add(pos.toImmutable());
+                                        visitedPositions.add(partner.toImmutable());
+                                        /*?}*/
+                                        continue;
+                                    }
                                     if (partner != null && visitedPositions.contains(partner)) {
                                         continue;
                                     }
+                                }
+                                if (blacklisted.contains(pos)) {
+                                    /*? if >=26.1 {*//*
+                                    visitedPositions.add(pos.immutable());
+                                    *//*?} else {*/
+                                    visitedPositions.add(pos.toImmutable());
+                                    /*?}*/
+                                    continue;
                                 }
                                 if (!visitedPositions.contains(pos)) {
                                     /*? if >=26.1 {*//*
@@ -510,6 +531,14 @@ public final class StashManager {
         } else {
             finishScan();
         }
+    }
+
+    private Set<BlockPos> getBlacklistedContainerPositions() {
+        Set<BlockPos> out = new HashSet<>();
+        out.addAll(MoarMod.getChestManager().getSupplyPositions());
+        out.addAll(MoarMod.getChestManager().getDumpPositions());
+        out.addAll(MoarMod.getChestManager().getStorageChests());
+        return out;
     }
 
     /** Walk toward the current target container. */
