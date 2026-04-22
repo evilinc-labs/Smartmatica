@@ -140,6 +140,24 @@ public class SpawnProofer {
     /** Position to return to after restocking. */
     private BlockPos returnPos;
 
+    /** Queue head currently awaiting server confirmation. */
+    private BlockPos pendingPlacementTarget;
+
+    /** Actual world position of the placement awaiting confirmation. */
+    private BlockPos pendingPlacementPos;
+
+    /** Desired state for the placement awaiting confirmation. */
+    private BlockState pendingPlacementState;
+
+    /** Number of timeout-based retries for the current placement target. */
+    private int pendingPlacementTimeouts;
+
+    /** Queue target currently associated with timeout retries. */
+    private BlockPos pendingTimeoutTarget;
+
+    /** Timeout-reposition cycles for the current target. */
+    private int pendingTimeoutCycles;
+
     /** Supply chest positions (reuses PrinterDatabase if available). */
     private final List<BlockPos> supplyChests = new ArrayList<>();
 
@@ -166,6 +184,22 @@ public class SpawnProofer {
      *  for the current queue head.  After a threshold, skip the position. */
     private int placeRetryTicks;
     private static final int MAX_PLACE_RETRIES = 40;
+
+    /** Cooldown ticks after arriving at a position before the first placement.
+     *  Gives the server time to acknowledge our position and reduces
+     *  packet bursts that trigger Grim velocity setbacks. */
+    private int placementSettleTicks;
+    private static final int PLACEMENT_SETTLE_DELAY = 3;
+
+    /** If the server rejects this many consecutive placements, auto-pause.
+     *  Likely caused by cross-region rejection on Folia or anti-cheat. */
+    private static final int REJECT_PAUSE_THRESHOLD = 6;
+
+    /** Retry silent placement timeouts a couple of times before repositioning. */
+    private static final int MAX_TIMEOUT_RETRIES = 2;
+
+    /** Max timeout cycles before skipping target. */
+    private static final int MAX_TIMEOUT_CYCLES = 3;
 
     // Public API
 
@@ -395,6 +429,9 @@ public class SpawnProofer {
         darkSpots.clear();
         placedPositions.clear();
         placementQueue.clear();
+        clearPendingPlacement();
+        resetPlacementTimeoutTracking();
+        PlacementEngine.reset();
         scanComplete = false;
         totalPlaced = 0;
         tickCounter = 0;
@@ -410,6 +447,8 @@ public class SpawnProofer {
     public void stop() {
         PathWalker.stop();
         PlacementEngine.reset();
+        clearPendingPlacement();
+        resetPlacementTimeoutTracking();
         state = State.IDLE;
         darkSpots.clear();
         placedPositions.clear();
@@ -422,6 +461,9 @@ public class SpawnProofer {
     public void pause() {
         if (isActive()) {
             PathWalker.stop();
+            clearPendingPlacement();
+            resetPlacementTimeoutTracking();
+            PlacementEngine.reset();
             state = State.PAUSED;
             ChatHelper.info("§eSpawnProofer paused. " + darkSpots.size() + " dark spots remaining.");
         }
@@ -455,6 +497,18 @@ public class SpawnProofer {
         /*?}*/
 
         tickCounter++;
+
+        // Process the verification queue so rejected placements are tracked
+        PlacementEngine.tickVerification();
+
+        // Auto-pause if the server keeps rejecting placements (Folia cross-region, anti-cheat)
+        if (PlacementEngine.getConsecutiveFailures() >= REJECT_PAUSE_THRESHOLD) {
+            PlacementEngine.resetRejectionCounters();
+            ChatHelper.info("§cServer failed to confirm " + REJECT_PAUSE_THRESHOLD
+                    + " consecutive placements — pausing spawnproofer");
+            pause();
+            return;
+        }
 
         switch (state) {
             case SCANNING    -> tickScanning(mc);
@@ -587,8 +641,9 @@ public class SpawnProofer {
                 target.getX() + 0.5, target.getY() + 0.5, target.getZ() + 0.5);
 
         if (distSq <= PLACE_REACH * PLACE_REACH) {
-            // Close enough to place — transition
+            // Close enough to place — transition with settle cooldown
             state = State.PLACING;
+            placementSettleTicks = PLACEMENT_SETTLE_DELAY;
             PathWalker.stop();
             return;
         }
@@ -602,6 +657,7 @@ public class SpawnProofer {
         if (PathWalker.hasArrived()) {
             PathWalker.stop();
             state = State.PLACING;
+            placementSettleTicks = PLACEMENT_SETTLE_DELAY;
             return;
         }
 
@@ -637,6 +693,12 @@ public class SpawnProofer {
             return;
         }
 
+        // Wait for settle cooldown after walking to reduce Grim velocity setbacks
+        if (placementSettleTicks > 0) {
+            placementSettleTicks--;
+            return;
+        }
+
         if (placementQueue.isEmpty()) {
             state = State.SCANNING;
             return;
@@ -648,6 +710,24 @@ public class SpawnProofer {
         *//*?} else {*/
         World world = mc.world;
         /*?}*/
+
+        if (pendingPlacementPos != null && pendingPlacementState != null) {
+            PlacementEngine.VerificationStatus status =
+                    PlacementEngine.getVerificationStatus(pendingPlacementPos, pendingPlacementState);
+            if (status == PlacementEngine.VerificationStatus.PENDING) {
+                return;
+            }
+            if (status == PlacementEngine.VerificationStatus.ACCEPTED) {
+                onPlacementConfirmed();
+                return;
+            }
+            if (status == PlacementEngine.VerificationStatus.TIMEOUT) {
+                onPlacementTimedOut();
+                return;
+            }
+            onPlacementRejected();
+            return;
+        }
 
         // Check if this spot already has light (resolved by a nearby placement).
         // target IS the placement position — check light level right there.
@@ -785,18 +865,9 @@ public class SpawnProofer {
         }
 
         if (PlacementEngine.placeBlock(placePos, desired, true)) {
-            placedPositions.add(placePos);
-            placementQueue.poll();
-            totalPlaced++;
+            rememberPendingPlacement(target, placePos, desired);
             placeRetryTicks = 0;
-            PlacementEngine.recordPlacement();
-
-            if (placementQueue.isEmpty()) {
-                // Do another scan to verify
-                state = State.SCANNING;
-            } else {
-                state = State.WALKING;
-            }
+            placementSettleTicks = PLACEMENT_SETTLE_DELAY;
         } else {
             placeRetryTicks++;
             if (placeRetryTicks >= MAX_PLACE_RETRIES) {
@@ -1366,6 +1437,137 @@ public class SpawnProofer {
     }
 
     // Utility
+
+    private void rememberPendingPlacement(BlockPos queueTarget, BlockPos placePos, BlockState desired) {
+        if (pendingTimeoutTarget == null || !pendingTimeoutTarget.equals(queueTarget)) {
+            resetPlacementTimeoutTracking();
+        }
+        /*? if >=26.1 {*//*
+        pendingPlacementTarget = queueTarget.immutable();
+        pendingPlacementPos = placePos.immutable();
+        *//*?} else {*/
+        pendingPlacementTarget = queueTarget.toImmutable();
+        pendingPlacementPos = placePos.toImmutable();
+        /*?}*/
+        pendingPlacementState = desired;
+    }
+
+    private void clearPendingPlacement() {
+        if (pendingPlacementPos != null) {
+            PlacementEngine.clearVerificationStatus(pendingPlacementPos);
+        }
+        pendingPlacementTarget = null;
+        pendingPlacementPos = null;
+        pendingPlacementState = null;
+    }
+
+    private void onPlacementConfirmed() {
+        BlockPos placedPos = pendingPlacementPos;
+        BlockPos queueTarget = pendingPlacementTarget;
+        clearPendingPlacement();
+
+        if (placedPos != null) {
+            placedPositions.add(placedPos);
+        }
+        if (queueTarget != null) {
+            if (!placementQueue.isEmpty() && queueTarget.equals(placementQueue.peek())) {
+                placementQueue.poll();
+            } else {
+                placementQueue.removeFirstOccurrence(queueTarget);
+            }
+        }
+
+        totalPlaced++;
+        resetPlacementTimeoutTracking();
+        placeRetryTicks = 0;
+        if (placementQueue.isEmpty()) {
+            state = State.SCANNING;
+        } else {
+            state = State.WALKING;
+        }
+    }
+
+    private void onPlacementRejected() {
+        BlockPos failedPos = pendingPlacementPos;
+        BlockPos queueTarget = pendingPlacementTarget;
+        clearPendingPlacement();
+
+        resetPlacementTimeoutTracking();
+        placementSettleTicks = PLACEMENT_SETTLE_DELAY;
+        placeRetryTicks++;
+        if (placeRetryTicks >= MAX_PLACE_RETRIES) {
+            LOGGER.debug("SpawnProofer: server rejected placement {} times at {}, skipping",
+                    placeRetryTicks, failedPos);
+            if (queueTarget != null) {
+                if (!placementQueue.isEmpty() && queueTarget.equals(placementQueue.peek())) {
+                    placementQueue.poll();
+                } else {
+                    placementQueue.removeFirstOccurrence(queueTarget);
+                }
+            }
+            placeRetryTicks = 0;
+            if (placementQueue.isEmpty()) {
+                state = State.SCANNING;
+            } else {
+                state = State.WALKING;
+            }
+        }
+    }
+
+    private void onPlacementTimedOut() {
+        BlockPos failedPos = pendingPlacementPos;
+        BlockPos queueTarget = pendingPlacementTarget;
+        clearPendingPlacement();
+
+        if (queueTarget != null && (pendingTimeoutTarget == null || !pendingTimeoutTarget.equals(queueTarget))) {
+            /*? if >=26.1 {*//*
+            pendingTimeoutTarget = queueTarget.immutable();
+            *//*?} else {*/
+            pendingTimeoutTarget = queueTarget.toImmutable();
+            /*?}*/
+            pendingPlacementTimeouts = 0;
+            pendingTimeoutCycles = 0;
+        }
+        placeRetryTicks = 0;
+        pendingPlacementTimeouts++;
+        placementSettleTicks = PLACEMENT_SETTLE_DELAY * 2;
+        if (pendingPlacementTimeouts < MAX_TIMEOUT_RETRIES) {
+            LOGGER.debug("SpawnProofer: placement confirmation timed out at {}, retrying ({}/{})",
+                    failedPos, pendingPlacementTimeouts, MAX_TIMEOUT_RETRIES);
+            return;
+        }
+
+        pendingPlacementTimeouts = 0;
+        pendingTimeoutCycles++;
+        if (pendingTimeoutCycles >= MAX_TIMEOUT_CYCLES) {
+            LOGGER.debug("SpawnProofer: placement confirmation timed out for {} cycles at {}, skipping",
+                    pendingTimeoutCycles, failedPos);
+            if (queueTarget != null) {
+                if (!placementQueue.isEmpty() && queueTarget.equals(placementQueue.peek())) {
+                    placementQueue.poll();
+                } else {
+                    placementQueue.removeFirstOccurrence(queueTarget);
+                }
+            }
+            resetPlacementTimeoutTracking();
+            if (placementQueue.isEmpty()) {
+                state = State.SCANNING;
+            } else {
+                state = State.WALKING;
+            }
+            return;
+        }
+
+        LOGGER.debug("SpawnProofer: placement confirmation timed out for cycle {} at {}, repositioning",
+                pendingTimeoutCycles, failedPos);
+        state = State.WALKING;
+    }
+
+    private void resetPlacementTimeoutTracking() {
+        pendingPlacementTimeouts = 0;
+        pendingTimeoutCycles = 0;
+        pendingTimeoutTarget = null;
+    }
 
     /** Format a position for display. */
     private static String formatPos(BlockPos pos) {

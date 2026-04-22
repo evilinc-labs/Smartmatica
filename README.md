@@ -1,41 +1,61 @@
-# MOAR — Minecraft Orchestrated Automation & Response
+# MOAR : Minecraft Orchestrated Automation & Response
 
-A client-side Fabric mod that automates schematic building, spawn-proofing, and container management. Load a `.litematic`, point it at some supply chests, and let it build.
+A client-side Fabric mod that automates schematic building, spawn-proofing, and container management. Load a `.litematic`, point it at some supply chests, and let it build, restock, recover from disconnects, and keep working across long multi-container runs.
+
+## 2.0 Highlights
+
+- **Smarter printer detection** : auto-detects active Litematica placements and can fall back to hologram block correlation when the live placement list is unavailable
+- **Resume-first building** : printer checkpoints survive disconnects and `/printer resume` restores the build state from disk
+- **Safer mode switching** : toggling between manual printer mode and AutoBuild now resets stale pathing and in-flight placement state cleanly
+- **Better no-Baritone fallback** : the built-in vanilla walker now respects nearby-goal radius better and avoids trying to path to unreachable vertical targets
+- **Anti-cheat-aware placement pacing** : placement and shulker interaction flows now wait for calmer movement windows instead of blindly stacking packets into setbacks
+- **Safer stash retrieval** : `/stash get` and `/stash kit load` skip protected supply/dump/storage containers, track owned shulkers, split oversized stacks, and abort cleanly after repeated failures
 
 ## What It Does
 
 ### Schematic Printer
-Load a Litematica schematic and build it automatically — or toggle manual mode to place blocks yourself.
+Load a Litematica schematic and build it automatically  or toggle manual mode to place blocks yourself.
 
-- **AutoBuild** — walks to each zone, grabs materials from supply chests, places blocks, and moves on
-- **Supply restocking** — indexes chests and shulker boxes; walks back to resupply when inventory runs low
-- **Shulker handling** — places, opens, loots, and breaks shulkers from supply; cleans up temp platforms
-- **Scaffold cleanup** — removes bridges and pillars placed during pathfinding after the build
-- **Self-correction** — detects wrong blocks and replaces them
-- **Smart tool selection** — picks the fastest tool for breaking
-- **Directional blocks** — handles stairs, slabs, trapdoors, doors, logs, pillars, etc.
-- **Liquid pass** — places water/lava after solids to keep pathfinding intact
-- **Checkpoints** — saves progress to SQLite; resume after disconnect with `/printer resume`
-- **Area clearing** — mines out a region before building; dumps items into designated chests
-- **Pathfinding** — uses [Baritone](https://github.com/cabaletta/baritone) if installed, otherwise falls back to a built-in vanilla walker
+- **AutoBuild**: walks to each zone, grabs materials from supply chests, places blocks, and moves on
+- **Manual + AutoBuild modes**: switch between assisted manual placement and full automation without stale walking/pathing state leaking across modes
+- **Litematica auto-detection**: loads the closest active placement automatically and can re-anchor from hologram blocks when placement metadata is missing
+- **Supply restocking**: indexes chests and shulker boxes; walks back to resupply when inventory runs low
+- **Shulker handling**: places, opens, loots, and breaks shulkers from supply; cleans up temp platforms
+- **Scaffold cleanup**: removes bridges and pillars placed during pathfinding after the build
+- **Self-correction**: detects wrong blocks and replaces them
+- **Placement verification**: waits for server confirmation to catch anti-cheat rollbacks and repeated rejected placements
+- **Inventory-swap settling**: avoids firing placement packets immediately after hotbar swaps from the main inventory
+- **Smart tool selection**: picks the fastest tool for breaking
+- **Directional blocks**: handles stairs, slabs, trapdoors, doors, logs, pillars, etc.
+- **Liquid pass**: places water/lava after solids to keep pathfinding intact
+- **Checkpoints**: saves progress to SQLite; resume after disconnect with `/printer resume`
+- **Area clearing**: mines out a region before building; dumps items into designated chests
+- **Protected pathfinding**: Baritone routes around storage and interactive blocks instead of mining through them during automation-sensitive walks
+- **Pathfinding** : uses [Baritone](https://github.com/cabaletta/baritone) if installed, otherwise falls back to a built-in vanilla walker tuned for nearby-zone approaches
 
 ### SpawnProofer
 Define a region and let it place light sources on every dark spawnable surface.
 
-- **Greedy solver** — picks positions that cover the most dark spots per placement
-- **Embed mode** — swaps ground blocks for full-block lights (glowstone, sea lanterns, froglights)
-- **Supply chests** — restocks light sources automatically
+- **Greedy solver** : picks positions that cover the most dark spots per placement
+- **Embed mode** : swaps ground blocks for full-block lights (glowstone, sea lanterns, froglights)
+- **Supply chests** : restocks light sources automatically
+- **Pause/resume** : pause a run mid-route and continue later without redefining the region
 
 ### Stash Manager
 Scan, index, and organize containers across large areas.
 
-- **Container indexing** — scans chests, barrels, shulker boxes, and hoppers in a defined region
-- **Auto-organizing** — sorts items into columns, packs shulkers, handles overflow
-- **Waypoint walking** — navigates between zones for areas beyond render distance
-- **CSV export** — exports the full inventory index to file
-- **Dump chests** — designate chests for depositing mined items during area clearing
-- **REST API** — embedded HTTP server with Prometheus metrics for Grafana dashboards
-- **Webhook** — POST JSON to n8n or other services on scan completion
+- **Container indexing** : scans chests, barrels, shulker boxes, and hoppers in a defined region
+- **Auto-organizing** : sorts items into columns, packs shulkers, handles overflow
+- **Item retrieval** : `/stash get <item> [count]` walks the stash and pulls exact items back to the player
+- **Kit system** : save, snapshot, edit, list, and load named loadouts with `/stash kit ...`
+- **Region profiles** : save/load/delete named scan regions with `/stash region ...`
+- **Protected-container blacklist** : stash retrieval skips printer supply chests, dump chests, and storage-designated containers
+- **Smarter shulker retrieval** : tracks owned shulkers, re-deposits no-longer-needed ones, and splits oversized stacks instead of over-pulling
+- **Waypoint walking** : navigates between zones for areas beyond render distance
+- **CSV export** : exports the full inventory index to file
+- **Dump chests** : designate chests for depositing mined items during area clearing
+- **REST API** : embedded HTTP server with Prometheus metrics for Grafana dashboards
+- **Webhook** : POST JSON to n8n or other services on scan completion
 
 ## Supported Versions
 
@@ -59,11 +79,11 @@ All versions require [Fabric Loader](https://fabricmc.net/use/) ≥ 0.18.4.
 
 ## Quick Start
 
-1. Load a schematic: `/printer load mybase.litematic`
-2. Stand where the build origin should be: `/printer here`
-3. Mark your supply chests: `/printer supply add` (look at each chest)
-4. Start building: `/printer autobuild`
-5. Check progress: `/printer status`
+1. Place or load a schematic in Litematica, then run `/printer detect` or `/printer load mybase.litematic`
+2. If you loaded manually, stand where the build origin should be and run `/printer here`
+3. Mark your supply chests with `/printer supply add` while looking at each container
+4. Start building with `/printer autobuild` or `/printer toggle`
+5. If you disconnect mid-build, return and use `/printer resume`
 
 ## Commands
 
@@ -75,7 +95,7 @@ All versions require [Fabric Loader](https://fabricmc.net/use/) ≥ 0.18.4.
 | `/printer autobuild` | Toggle fully automated building |
 | `/printer load <file>` | Load a `.litematic` schematic |
 | `/printer unload` | Unload the current schematic |
-| `/printer detect` | Auto-detect active Litematica placements |
+| `/printer detect` | Auto-detect active Litematica placements, with hologram-anchor fallback |
 | `/printer list` | List available schematic files |
 | `/printer here` | Anchor schematic to current position |
 | `/printer pos <x> <y> <z>` | Anchor schematic to specific coordinates |
@@ -122,10 +142,14 @@ All versions require [Fabric Loader](https://fabricmc.net/use/) ≥ 0.18.4.
 | `/stash scan` | Scan all containers in the region |
 | `/stash organize` | Auto-organize: column sort, shulker pack, overflow |
 | `/stash organize stop` | Stop organizing |
+| `/stash search <item>` | Find scanned containers holding an item |
+| `/stash get <item> [count]` | Retrieve an item directly from the indexed stash |
 | `/stash stop` | Stop scanning |
 | `/stash status` | Show scan state and index summary |
 | `/stash export` | Export inventory index to CSV |
 | `/stash clear` | Clear the index |
+| `/stash kit create|snapshot|add|remove|show|list|delete|load` | Manage and retrieve named kits |
+| `/stash region save|load|list|delete` | Manage named region profiles |
 | `/stash dump add [x y z]` | Mark a dump chest |
 | `/stash dump remove` | Unmark the nearest dump chest |
 | `/stash dump list` | List all dump chests |
@@ -181,10 +205,10 @@ Requires **JDK 21+**.
 ```bash
 ./gradlew build                  # Build all versions
 ./gradlew :1.21.8:build          # Build one version
-./gradlew buildAndCollect        # Collect all JARs → build/libs/1.2.1/
+./gradlew buildAndCollect        # Collect all JARs → build/libs/2.0.0/
 ```
 
-Output: `versions/<mc>/build/libs/moar-1.2.1+<mc>.jar`
+Output: `versions/<mc>/build/libs/moar-2.0.0+<mc>.jar`
 
 ### Build Stack
 
@@ -196,7 +220,7 @@ Output: `versions/<mc>/build/libs/moar-1.2.1+<mc>.jar`
 
 ### Baritone Integration
 
-Baritone is loaded via reflection at runtime — no compile dependency, nothing bundled. If Baritone isn't installed, the mod uses its built-in vanilla walker instead.
+Baritone is loaded via reflection at runtime : no compile dependency, nothing bundled. If Baritone isn't installed, the mod uses its built-in vanilla walker instead. On Baritone-enabled installs, MOAR also protects storage and other interactive blocks from path-mining during sensitive automation flows.
 
 ## License
 

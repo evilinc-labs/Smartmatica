@@ -220,25 +220,26 @@ public final class PathWalker {
      * Uses Baritone pathfinding if available, vanilla key simulation otherwise.
      */
     public static void walkTo(BlockPos pos) {
-        /*? if >=26.1 {*//*
-        target = pos.immutable();
-        *//*?} else {*/
-        target = pos.toImmutable();
-        /*?}*/
-        active = true;
-        arrived = false;
-        stuck = false;
-        ticksWalking = 0;
-        goalRadius = 0;
-        yLevelTarget = Integer.MIN_VALUE;
-        lastProgressPos = null;
-        lastProgressTick = 0;
-        stuckCycles = 0;
-        recordInitialDistance(pos);
-        LOGGER.debug("PathWalker: walking to ({}, {}, {})", pos.getX(), pos.getY(), pos.getZ());
-
         if (BARITONE_AVAILABLE) {
+            /*? if >=26.1 {*//*
+            target = pos.immutable();
+            *//*?} else {*/
+            target = pos.toImmutable();
+            /*?}*/
+            active = true;
+            arrived = false;
+            stuck = false;
+            ticksWalking = 0;
+            goalRadius = 0;
+            yLevelTarget = Integer.MIN_VALUE;
+            lastProgressPos = null;
+            lastProgressTick = 0;
+            stuckCycles = 0;
+            recordInitialDistance(pos);
+            LOGGER.debug("PathWalker: walking to ({}, {}, {})", pos.getX(), pos.getY(), pos.getZ());
             BaritoneDelegate.walkTo(pos);
+        } else {
+            startVanillaWalk(pos, 0);
         }
     }
 
@@ -287,7 +288,7 @@ public final class PathWalker {
             LOGGER.debug("PathWalker: walking near ({}, {}, {}) r={}", pos.getX(), pos.getY(), pos.getZ(), radius);
             BaritoneDelegate.walkToNearby(pos, radius);
         } else {
-            walkTo(pos);
+            startVanillaWalk(pos, radius);
         }
     }
 
@@ -302,23 +303,47 @@ public final class PathWalker {
         if (BARITONE_AVAILABLE) {
             BaritoneDelegate.stop();
         }
+        startVanillaWalk(pos, 0);
+    }
+
+    private static void startVanillaWalk(BlockPos pos, int radius) {
+        BlockPos vanillaTarget = normalizeVanillaTarget(pos);
         /*? if >=26.1 {*//*
-        target = pos.immutable();
+        target = vanillaTarget.immutable();
         *//*?} else {*/
-        target = pos.toImmutable();
+        target = vanillaTarget.toImmutable();
         /*?}*/
         active = true;
         arrived = false;
         stuck = false;
         ticksWalking = 0;
-        goalRadius = 0;
+        goalRadius = radius;
         yLevelTarget = Integer.MIN_VALUE;
         lastProgressPos = null;
         lastProgressTick = 0;
         stuckCycles = 0;
         vanillaFallback = true;
-        recordInitialDistance(pos);
-        LOGGER.debug("PathWalker: vanilla walking to ({}, {}, {})", pos.getX(), pos.getY(), pos.getZ());
+        recordInitialDistance(vanillaTarget);
+        LOGGER.debug("PathWalker: vanilla walking to ({}, {}, {}) r={}",
+                vanillaTarget.getX(), vanillaTarget.getY(), vanillaTarget.getZ(), radius);
+    }
+
+    private static BlockPos normalizeVanillaTarget(BlockPos pos) {
+        /*? if >=26.1 {*//*
+        Minecraft mc = Minecraft.getInstance();
+        if (mc.player == null) return pos;
+        BlockPos playerPos = mc.player.blockPosition();
+        *//*?} else {*/
+        MinecraftClient mc = MinecraftClient.getInstance();
+        if (mc.player == null) return pos;
+        BlockPos playerPos = mc.player.getBlockPos();
+        /*?}*/
+
+        // Vanilla WASD fallback cannot deliberately climb or descend long
+        // vertical gaps. Keep the XZ target, but travel at the player's
+        // current Y so the caller can load chunks / approach horizontally.
+        if (Math.abs(pos.getY() - playerPos.getY()) <= 4) return pos;
+        return new BlockPos(pos.getX(), playerPos.getY(), pos.getZ());
     }
 
     /**
@@ -609,6 +634,17 @@ public final class PathWalker {
     public static BlockPos getTarget() { return target; }
     public static int getTicksWalking() { return ticksWalking; }
     public static boolean isPlacementEnabled() { return placementEnabled; }
+
+    /**
+     * Toggle Baritone's master allowBreak. When false, no block is mined
+     * during pathing. Caller must restore to true when done.
+     * No-op if Baritone isn't loaded.
+     */
+    public static void setBreakingAllowed(boolean allowed) {
+        if (BARITONE_AVAILABLE) {
+            BaritoneDelegate.setAllowBreak(allowed);
+        }
+    }
 
     /**
      * Returns the set of item IDs that Baritone considers acceptable
@@ -1074,6 +1110,7 @@ public final class PathWalker {
         private static Object settingsInstance;
         private static Object allowPlaceSetting;   // Settings.Setting<Boolean>
         private static Object allowParkourSetting;  // Settings.Setting<Boolean>
+        private static Object allowBreakSetting;    // Settings.Setting<Boolean>
         private static Object allowInventorySetting; // Settings.Setting<Boolean>
         private static Object maxFallHeightSetting;   // Settings.Setting<Integer>
         private static Object throwawayItemsSetting; // Settings.Setting<List<Item>>
@@ -1150,6 +1187,21 @@ public final class PathWalker {
                             settingsInstance.getClass().getField("allowParkour");
                     allowParkourSetting = allowParkourField.get(settingsInstance);
 
+                    // allowBreak — master switch for whether Baritone
+                    // is allowed to mine ANY block while pathing.
+                    // Used by setBreakingAllowed() so callers can
+                    // disable mining entirely for sensitive walks
+                    // (e.g. stash retrieval).
+                    try {
+                        java.lang.reflect.Field allowBreakField =
+                                settingsInstance.getClass().getField("allowBreak");
+                        allowBreakSetting = allowBreakField.get(settingsInstance);
+                    } catch (NoSuchFieldException nsfe) {
+                        // Older Baritone — master allowBreak doesn't
+                        // exist; setBreakingAllowed becomes a no-op.
+                        allowBreakSetting = null;
+                    }
+
                     // allowInventory — lets Baritone search the FULL
                     // inventory (slots 9-35) for throwaway items, not
                     // just the hotbar.  It will swap items to the
@@ -1190,6 +1242,12 @@ public final class PathWalker {
                     } catch (Exception pe) {
                         LOGGER.warn("PathWalker: failed to enable allowParkour", pe);
                     }
+
+                    // Forbid Baritone from breaking storage / interactive
+                    // blocks while pathing. Without this it cheerfully
+                    // mines through chests, shulkers, barrels, hoppers,
+                    // etc. to take the shortest route.
+                    configureDisallowedBreakingBlocks();
                 } catch (Exception e) {
                     LOGGER.warn("PathWalker: Baritone settings reflection failed "
                             + "— placement-mode walks will use default Baritone settings", e);
@@ -1197,8 +1255,95 @@ public final class PathWalker {
             }
         }
 
+        /**
+         * Add storage / interactive blocks to Baritone's
+         * blocksToDisallowBreaking list. Baritone will route around
+         * these instead of mining them.
+         */
+        @SuppressWarnings("unchecked")
+        private static void configureDisallowedBreakingBlocks() {
+            try {
+                java.lang.reflect.Field disallowField =
+                        settingsInstance.getClass().getField("blocksToDisallowBreaking");
+                Object disallowSetting = disallowField.get(settingsInstance);
+                Object current = settingValueField.get(disallowSetting);
+                if (!(current instanceof java.util.List)) return;
+                java.util.List<Block> list = new ArrayList<>((java.util.List<Block>) current);
+
+                // Storage containers
+                addIfPresent(list, "minecraft:chest");
+                addIfPresent(list, "minecraft:trapped_chest");
+                addIfPresent(list, "minecraft:ender_chest");
+                addIfPresent(list, "minecraft:barrel");
+                addIfPresent(list, "minecraft:hopper");
+                addIfPresent(list, "minecraft:dispenser");
+                addIfPresent(list, "minecraft:dropper");
+                addIfPresent(list, "minecraft:furnace");
+                addIfPresent(list, "minecraft:blast_furnace");
+                addIfPresent(list, "minecraft:smoker");
+                addIfPresent(list, "minecraft:brewing_stand");
+                addIfPresent(list, "minecraft:lectern");
+                addIfPresent(list, "minecraft:chiseled_bookshelf");
+                // All shulker box colors share a common loot/ID prefix
+                addIfPresent(list, "minecraft:shulker_box");
+                String[] colors = {"white","orange","magenta","light_blue","yellow",
+                        "lime","pink","gray","light_gray","cyan","purple","blue",
+                        "brown","green","red","black"};
+                for (String c : colors) addIfPresent(list, "minecraft:" + c + "_shulker_box");
+                // Other valuable / interactive blocks
+                addIfPresent(list, "minecraft:beacon");
+                addIfPresent(list, "minecraft:conduit");
+                addIfPresent(list, "minecraft:enchanting_table");
+                addIfPresent(list, "minecraft:anvil");
+                addIfPresent(list, "minecraft:chipped_anvil");
+                addIfPresent(list, "minecraft:damaged_anvil");
+                addIfPresent(list, "minecraft:crafter");
+                addIfPresent(list, "minecraft:decorated_pot");
+
+                settingValueField.set(disallowSetting, list);
+                LOGGER.info("PathWalker: Baritone blocksToDisallowBreaking now contains {} entries "
+                        + "(storage blocks protected from path mining)", list.size());
+            } catch (NoSuchFieldException nsfe) {
+                LOGGER.warn("PathWalker: Baritone version lacks blocksToDisallowBreaking — "
+                        + "path mining of containers cannot be prevented");
+            } catch (Exception e) {
+                LOGGER.warn("PathWalker: failed to configure Baritone blocksToDisallowBreaking", e);
+            }
+        }
+
+        private static void addIfPresent(java.util.List<Block> list, String id) {
+            try {
+                /*? if >=26.1 {*//*
+                net.minecraft.resources.Identifier key = net.minecraft.resources.Identifier.tryParse(id);
+                if (key == null) return;
+                Block b = net.minecraft.core.registries.BuiltInRegistries.BLOCK.getValue(key);
+                *//*?} else {*/
+                net.minecraft.util.Identifier key = net.minecraft.util.Identifier.tryParse(id);
+                if (key == null) return;
+                Block b = net.minecraft.registry.Registries.BLOCK.get(key);
+                /*?}*/
+                if (b != null && !list.contains(b)) list.add(b);
+            } catch (Exception ignored) {
+                // Block doesn't exist in this version — skip silently
+            }
+        }
+
         static boolean isReady() {
             return ready;
+        }
+
+        /**
+         * Set Baritone's allowBreak master switch. Silent no-op if the
+         * settings reflection failed or the setting doesn't exist on
+         * this Baritone version.
+         */
+        static void setAllowBreak(boolean allowed) {
+            if (!settingsReady || allowBreakSetting == null) return;
+            try {
+                settingValueField.set(allowBreakSetting, allowed);
+            } catch (Exception e) {
+                LOGGER.warn("PathWalker: failed to set Baritone allowBreak={}", allowed, e);
+            }
         }
 
         /**
@@ -1501,6 +1646,9 @@ public final class PathWalker {
         /*?}*/
         double dxz2 = horizontalDistSq(playerPos, targetCenter);
         double dy = Math.abs(playerPos.y - targetCenter.y);
+        double arrivalDistSq = goalRadius > 0
+            ? Math.max(ARRIVAL_DIST_SQ, goalRadius * goalRadius)
+            : ARRIVAL_DIST_SQ;
 
         // fall detection
         // If the player is now significantly below the target (fell off
@@ -1515,7 +1663,7 @@ public final class PathWalker {
             return;
         }
 
-        if (dxz2 <= ARRIVAL_DIST_SQ && dy <= ARRIVAL_Y_TOLERANCE) {
+        if (dxz2 <= arrivalDistSq && dy <= ARRIVAL_Y_TOLERANCE) {
             LOGGER.debug("PathWalker[Vanilla]: arrived at target after {} ticks", ticksWalking);
             releaseKeys();
             arrived = true;

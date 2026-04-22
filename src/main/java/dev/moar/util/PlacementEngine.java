@@ -185,6 +185,8 @@ public final class PlacementEngine {
     private static float      savedYaw;
     private static float      savedPitch;
     private static int        rotateTicks;
+    private static final int  INVENTORY_SWAP_SETTLE_TICKS = 2;
+    private static int        inventorySwapSettleTicks;
 
     // self-correction state
     /** Position of a block that was placed with wrong orientation. */
@@ -227,21 +229,55 @@ public final class PlacementEngine {
     private static long   lastPlacementNano = 0;
 
     // Server-side placement verification — detect anti-cheat rollbacks.
-    private static final int VERIFY_DELAY_TICKS = 4;
+    private static final int VERIFY_DELAY_TICKS = 8;
+    private static final int VERIFY_TIMEOUT_TICKS = 24;
     private static final int MAX_VERIFY_QUEUE = 32;
+    private static int consecutiveFailures = 0;
+    private static int totalTimeouts = 0;
     private static int consecutiveRejections = 0;
     private static int totalRejections = 0;
 
-    private record PendingVerification(BlockPos pos, BlockState expected, long placeTick) {}
-    private static final ArrayDeque<PendingVerification> verifyQueue = new ArrayDeque<>();
+    public enum VerificationStatus {
+        NONE,
+        PENDING,
+        ACCEPTED,
+        TIMEOUT,
+        REJECTED
+    }
 
+    private record PendingVerification(BlockPos pos, BlockState expected, BlockState original, long placeTick) {}
+    private record VerificationSnapshot(BlockState expected, VerificationStatus status) {}
+    private static final ArrayDeque<PendingVerification> verifyQueue = new ArrayDeque<>();
+    private static final Map<BlockPos, VerificationSnapshot> verificationStates = new HashMap<>();
+
+    /** Number of consecutive placements that failed confirmation. */
+    public static int getConsecutiveFailures() { return consecutiveFailures; }
+    /** Total placements that timed out since last reset. */
+    public static int getTotalTimeouts() { return totalTimeouts; }
     /** Number of consecutive placements that were rejected by the server. */
     public static int getConsecutiveRejections() { return consecutiveRejections; }
     /** Total placements rejected since last reset. */
     public static int getTotalRejections() { return totalRejections; }
     public static void resetRejectionCounters() {
+        verifyQueue.clear();
+        verificationStates.clear();
+        consecutiveFailures = 0;
+        totalTimeouts = 0;
         consecutiveRejections = 0;
         totalRejections = 0;
+    }
+
+    public static VerificationStatus getVerificationStatus(BlockPos pos, BlockState expected) {
+        VerificationSnapshot snapshot = verificationStates.get(pos);
+        if (snapshot == null) return VerificationStatus.NONE;
+        if (snapshot.expected.getBlock() != expected.getBlock()) {
+            return VerificationStatus.NONE;
+        }
+        return snapshot.status;
+    }
+
+    public static void clearVerificationStatus(BlockPos pos) {
+        verificationStates.remove(pos);
     }
 
     /** Tick the verification queue. Call once per game tick. */
@@ -256,6 +292,7 @@ public final class PlacementEngine {
         *//*?} else {*/
         if (mc.world == null) return;
         /*?}*/
+        if (inventorySwapSettleTicks > 0) inventorySwapSettleTicks--;
         /*? if >=26.1 {*//*
         long currentTick = mc.level.getGameTime();
         *//*?} else {*/
@@ -265,7 +302,7 @@ public final class PlacementEngine {
         while (!verifyQueue.isEmpty()) {
             PendingVerification pv = verifyQueue.peek();
             if (currentTick - pv.placeTick < VERIFY_DELAY_TICKS) break;
-            verifyQueue.poll();
+            long elapsedTicks = currentTick - pv.placeTick;
 
             /*? if >=26.1 {*//*
             BlockState actual = mc.level.getBlockState(pv.pos);
@@ -274,11 +311,30 @@ public final class PlacementEngine {
             /*?}*/
             if (actual.getBlock() == pv.expected.getBlock()) {
                 // Confirmed — server accepted the placement
+                verifyQueue.poll();
+                verificationStates.put(pv.pos,
+                        new VerificationSnapshot(pv.expected, VerificationStatus.ACCEPTED));
+                consecutiveFailures = 0;
                 consecutiveRejections = 0;
-            } else {
-                // Server rolled back the block
+            } else if (actual.getBlock() != pv.original.getBlock()) {
+                // Another server-side update won the race, so this attempt was rejected.
+                verifyQueue.poll();
+                verificationStates.put(pv.pos,
+                        new VerificationSnapshot(pv.expected, VerificationStatus.REJECTED));
+                consecutiveFailures++;
                 consecutiveRejections++;
                 totalRejections++;
+            } else if (elapsedTicks >= VERIFY_TIMEOUT_TICKS) {
+                // The server never reflected the placement or a rollback packet.
+                verifyQueue.poll();
+                verificationStates.put(pv.pos,
+                        new VerificationSnapshot(pv.expected, VerificationStatus.TIMEOUT));
+                consecutiveFailures++;
+                totalTimeouts++;
+            } else {
+                verificationStates.put(pv.pos,
+                        new VerificationSnapshot(pv.expected, VerificationStatus.PENDING));
+                break;
             }
         }
     }
@@ -295,14 +351,26 @@ public final class PlacementEngine {
         if (mc.world == null) return;
         /*?}*/
         if (verifyQueue.size() >= MAX_VERIFY_QUEUE) {
-            verifyQueue.poll(); // drop oldest
+            PendingVerification dropped = verifyQueue.poll();
+            if (dropped != null) {
+                verificationStates.put(dropped.pos,
+                        new VerificationSnapshot(dropped.expected, VerificationStatus.TIMEOUT));
+            }
         }
-        verifyQueue.add(new PendingVerification(
+        /*? if >=26.1 {*//*
+        BlockState original = mc.level.getBlockState(pos);
+        *//*?} else {*/
+        BlockState original = mc.world.getBlockState(pos);
+        /*?}*/
+        PendingVerification pending = new PendingVerification(
                 /*? if >=26.1 {*//*
-                pos.immutable(), expected, mc.level.getGameTime()));
+                pos.immutable(), expected, original, mc.level.getGameTime());
                 *//*?} else {*/
-                pos.toImmutable(), expected, mc.world.getTime()));
+                pos.toImmutable(), expected, original, mc.world.getTime());
                 /*?}*/
+        verifyQueue.add(pending);
+        verificationStates.put(pending.pos,
+                new VerificationSnapshot(pending.expected, VerificationStatus.PENDING));
     }
 
     public static void setBps(int value) {
@@ -391,6 +459,7 @@ public final class PlacementEngine {
         pendingAirPlace = false;
         singleTickInProgress = false;
         pendingItem = null;
+        inventorySwapSettleTicks = 0;
         correctionTarget = null;
         correctionDesired = null;
         breakingTicks = 0;
@@ -398,9 +467,7 @@ public final class PlacementEngine {
         java.util.Arrays.fill(placeHistory, 0L);
         historyIdx = 0;
         lastBatchMs = 0L;
-        verifyQueue.clear();
-        consecutiveRejections = 0;
-        totalRejections = 0;
+        resetRejectionCounters();
     }
 
     public static void clearCorrectionHistory() {
@@ -608,6 +675,13 @@ public final class PlacementEngine {
         *//*?} else {*/
         ClientPlayerEntity player = mc.player;
         /*?}*/
+
+        // A container SWAP can succeed client-side before the server treats the
+        // new hotbar item as held. Waiting briefly avoids place packets racing
+        // ahead of the inventory update.
+        if (inventorySwapSettleTicks > 0) {
+            return false;
+        }
 
         if (pendingItem != null) {
             /*? if >=26.1 {*//*
@@ -829,11 +903,10 @@ public final class PlacementEngine {
             *//*?} else {*/
             player.swingHand(Hand.MAIN_HAND);
             /*?}*/
-            /*? if >=26.1 {*//*
-            mc.level.setBlockAndUpdate(pendingTarget, pendingDesired);
-            *//*?} else {*/
-            mc.world.setBlockState(pendingTarget, pendingDesired);
-            /*?}*/
+            // No client-side prediction — wait for server confirmation.
+            // Predicting locally causes ghost blocks on Folia (cross-region
+            // rejection never sends a rollback packet) and on servers with
+            // anti-cheat that silently cancel placements.
             enqueueVerification(pendingTarget, pendingDesired);
             placed = true;
         }
@@ -1481,6 +1554,7 @@ public final class PlacementEngine {
         Item requiredItem = states.get(0).getBlock().asItem();
         if (requiredItem == Items.AIR) return 0;
         if (!selectItem(player, mc, requiredItem, allowSwap)) return 0;
+        if (inventorySwapSettleTicks > 0) return 0;
 
         List<BatchEntry> entries = new ArrayList<>(BATCH_MAX);
         boolean needsSneak = false;
@@ -1636,11 +1710,8 @@ public final class PlacementEngine {
             *//*?} else {*/
             entries.add(new BatchEntry(target.toImmutable(), desired, hitResult));
             /*?}*/
-            /*? if >=26.1 {*//*
-            world.setBlockAndUpdate(target, desired);
-            *//*?} else {*/
-            world.setBlockState(target, desired);
-            /*?}*/
+            // No client-side prediction — server sends block update on acceptance.
+            enqueueVerification(target, desired);
         }
 
         if (entries.isEmpty()) return 0;
@@ -2042,6 +2113,35 @@ public final class PlacementEngine {
         /*?}*/
     }
 
+    /** Forces sneak on for placement; returns a Runnable that restores it. */
+    /*? if >=26.1 {*//*
+    public static Runnable ensureSneakForPlacement(LocalPlayer player) {
+    *//*?} else {*/
+    public static Runnable ensureSneakForPlacement(ClientPlayerEntity player) {
+    /*?}*/
+        boolean wasAbsoluteSneak = SneakOverride.isForceAbsoluteSneak();
+        boolean wasForceSneak = SneakOverride.isForceSneak();
+        SneakOverride.setForceSneak(true);
+        /*? if >=26.1 {*//*
+        player.setShiftKeyDown(true);
+        *//*?} else {*/
+        player.setSneaking(true);
+        /*?}*/
+        pressSneakPacket(player);
+        return () -> {
+            if (!wasAbsoluteSneak) SneakOverride.setForceAbsoluteSneak(false);
+            if (!wasForceSneak) SneakOverride.setForceSneak(false);
+            if (!wasAbsoluteSneak && !wasForceSneak) {
+                /*? if >=26.1 {*//*
+                player.setShiftKeyDown(false);
+                *//*?} else {*/
+                player.setSneaking(false);
+                /*?}*/
+                releaseSneakPacket();
+            }
+        };
+    }
+
     /** Releases sneak for interaction; returns a Runnable that restores it. */
     /*? if >=26.1 {*//*
     public static Runnable releaseForInteraction(LocalPlayer player) {
@@ -2213,6 +2313,7 @@ public final class PlacementEngine {
                             /*?}*/
                             player
                     );
+                    inventorySwapSettleTicks = INVENTORY_SWAP_SETTLE_TICKS;
                     return true;
                 }
             }
@@ -3191,6 +3292,25 @@ public final class PlacementEngine {
             if (preferred != null) return preferred;
             // No matching face — air placement fallback
             return null;
+        }
+
+        // Shulker boxes — click opposite face for correct FACING.
+        if (block instanceof ShulkerBoxBlock) {
+            /*? if >=26.1 {*//*
+            if (desired.hasProperty(BlockStateProperties.FACING)) {
+            *//*?} else {*/
+            if (desired.contains(Properties.FACING)) {
+            /*?}*/
+                /*? if >=26.1 {*//*
+                Direction facing = desired.getValue(BlockStateProperties.FACING);
+                *//*?} else {*/
+                Direction facing = desired.get(Properties.FACING);
+                /*?}*/
+                Direction supportDir = facing.getOpposite();
+                Direction result = requireSolidFace(world, target, supportDir);
+                if (result != null) return result;
+            }
+            return findPlacementFace(world, target);
         }
 
         return findPlacementFace(world, target);

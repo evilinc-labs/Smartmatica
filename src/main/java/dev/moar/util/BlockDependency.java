@@ -384,6 +384,49 @@ public final class BlockDependency {
         return getRequiredSupport(state) == null ? 0 : 1;
     }
 
+    /** True for non-load-bearing redstone components/rails deferred to the redstone pass. */
+    public static boolean isRedstoneComponent(BlockState state) {
+        Block block = state.getBlock();
+
+        // Wiring and low-profile logic components
+        /*? if >=26.1 {*//*
+        if (block instanceof RedStoneWireBlock) return true;
+        *//*?} else {*/
+        if (block instanceof RedstoneWireBlock) return true;
+        /*?}*/
+        /*? if >=26.1 {*//*
+        if (block instanceof DiodeBlock) return true;          // repeaters + comparators
+        *//*?} else {*/
+        if (block instanceof AbstractRedstoneGateBlock) return true;
+        /*?}*/
+        if (block instanceof RedstoneTorchBlock) return true;  // includes wall variant
+
+        // Attachment-style controls
+        if (block instanceof LeverBlock) return true;
+        if (block instanceof ButtonBlock) return true;
+        /*? if >=26.1 {*//*
+        if (block instanceof BasePressurePlateBlock) return true;
+        *//*?} else {*/
+        if (block instanceof AbstractPressurePlateBlock) return true;
+        /*?}*/
+        /*? if >=26.1 {*//*
+        if (block instanceof TripWireHookBlock) return true;
+        if (block instanceof TripWireBlock) return true;
+        *//*?} else {*/
+        if (block instanceof TripwireHookBlock) return true;
+        if (block instanceof TripwireBlock) return true;
+        /*?}*/
+
+        // Rails
+        /*? if >=26.1 {*//*
+        if (block instanceof BaseRailBlock) return true;
+        *//*?} else {*/
+        if (block instanceof AbstractRailBlock) return true;
+        /*?}*/
+
+        return false;
+    }
+
     // --- INTERNAL HELPERS
 
     // True if block at pos is solid (non-replaceable with collision shape).

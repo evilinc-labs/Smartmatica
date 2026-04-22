@@ -2,6 +2,7 @@ package dev.moar;
 
 import dev.moar.api.ApiServer;
 import dev.moar.api.MoarProperties;
+import dev.moar.world.SetbackMonitor;
 import dev.moar.chest.ChestManager;
 import dev.moar.command.PrinterCommand;
 import dev.moar.command.SpawnProofCommand;
@@ -104,6 +105,10 @@ public class MoarMod implements ClientModInitializer {
 
         // Register tick handler
         ClientTickEvents.END_CLIENT_TICK.register(client -> {
+            // Setback monitor must tick first so other subsystems see
+            // up-to-date isCalm() / ticksSinceSetback() this tick.
+            SetbackMonitor.get().tick(client);
+
             // Toggle keybind check
             /*? if >=26.1 {*//*
             while (toggleKey.consumeClick()) {
@@ -136,8 +141,10 @@ public class MoarMod implements ClientModInitializer {
             PRINTER.onDisconnect();
             STASH_MANAGER.stop();
             STASH_MANAGER.getOrganizer().stop();
+            STASH_MANAGER.getRetriever().stop();
             SPAWN_PROOFER.stop();
             PathWalker.stop();
+            SetbackMonitor.get().reset();
             PrinterDatabase.clearScaffold();
             DATABASE.close();
             if (API_SERVER != null) API_SERVER.close();

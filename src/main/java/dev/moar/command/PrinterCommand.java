@@ -292,6 +292,17 @@ public final class PrinterCommand {
                                 SchematicPrinter.detectAllPlacements();
 
                         if (placements.isEmpty()) {
+                            if (printer.isLoaded()) {
+                                BlockPos pos = LitematicaDetector.detectAnchorFromSchematicWorld(
+                                        printer.getSchematic());
+                                if (pos != null) {
+                                    printer.setAnchor(pos);
+                                    ChatHelper.info("§eNo active placement list found, but hologram blocks were detected.");
+                                    ChatHelper.info("§aAnchor aligned from hologram blocks.");
+                                    ChatHelper.info("§7Use §f/printer toggle §7to start printing.");
+                                    return 1;
+                                }
+                            }
                             ChatHelper.info("§cNo active Litematica placements detected.");
                             ChatHelper.info("§7Make sure you have a schematic loaded and placed in Litematica.");
                             return 0;
