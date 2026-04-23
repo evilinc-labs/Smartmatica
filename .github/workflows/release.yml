@@ -3,9 +3,13 @@ name: Release
 on:
   push:
     tags: ['v*']
+  workflow_dispatch:
 
 permissions:
   contents: write
+  id-token: write
+  attestations: write
+  artifact-metadata: write
 
 jobs:
   release:
@@ -107,6 +111,47 @@ jobs:
             echo "EOF"
           } >> "$GITHUB_OUTPUT"
 
+      - name: Resolve release artifact paths
+        id: artifacts
+        run: |
+          VER="${{ steps.version.outputs.version }}"
+          jar_path="build/libs/${VER}/*.jar"
+          sbom_path="build/release/moar-${VER}.spdx.json"
+          echo "jar_path=${jar_path}" >> "$GITHUB_OUTPUT"
+          echo "sbom_path=${sbom_path}" >> "$GITHUB_OUTPUT"
+
+      - name: Generate SBOM
+        uses: anchore/sbom-action@v0
+        with:
+          file: ${{ steps.artifacts.outputs.jar_path }}
+          format: spdx-json
+          output-file: ${{ steps.artifacts.outputs.sbom_path }}
+          upload-artifact: false
+          upload-release-assets: false
+
+      - name: Generate SHA-256 checksums
+        run: |
+          VER="${{ steps.version.outputs.version }}"
+          mkdir -p build/release
+          for jar in build/libs/${VER}/*.jar; do
+            [ -f "$jar" ] || continue
+            out="build/release/$(basename "$jar").sha256"
+            sha256sum "$jar" > "$out"
+            echo "Generated checksum for $(basename "$jar")"
+            cat "$out"
+          done
+
+      - name: Attest release artifacts provenance
+        uses: actions/attest@v4
+        with:
+          subject-path: ${{ steps.artifacts.outputs.jar_path }}
+
+      - name: Attest release artifact SBOM
+        uses: actions/attest@v4
+        with:
+          subject-path: ${{ steps.artifacts.outputs.jar_path }}
+          sbom-path: ${{ steps.artifacts.outputs.sbom_path }}
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
@@ -126,5 +171,7 @@ jobs:
           files: |
             ${{ steps.package.outputs.staging }}/moar-*.zip
             ${{ steps.package.outputs.staging }}/moar-*-sources.jar
+            ${{ steps.package.outputs.staging }}/*.sha256
+            ${{ steps.artifacts.outputs.sbom_path }}
           fail_on_unmatched_files: true
           generate_release_notes: false
