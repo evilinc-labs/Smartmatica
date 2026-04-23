@@ -1,5 +1,7 @@
 # MOAR : Minecraft Orchestrated Automation & Response
 
+[![Downloads](https://img.shields.io/github/downloads/evilinc/litematica-printer/total?style=for-the-badge&logo=github&label=Downloads)](https://github.com/evilinc/litematica-printer/releases)
+
 A client-side Fabric mod that automates schematic building, spawn-proofing, and container management. Load a `.litematic`, point it at some supply chests, and let it build, restock, recover from disconnects, and keep working across long multi-container runs.
 
 ## 2.0 Highlights
