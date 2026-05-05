@@ -1109,7 +1109,7 @@ public final class PrinterCommand {
         return null;
     }
 
-    /** Whether the block is a supported container type. */
+    // Whether the block is a supported container type.
     private static boolean isContainer(Block block) {
         return block instanceof ChestBlock
                 || block instanceof BarrelBlock

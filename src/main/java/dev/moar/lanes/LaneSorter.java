@@ -37,15 +37,10 @@ import org.slf4j.LoggerFactory;
 
 import java.util.*;
 
-/**
- * State machine that deposits matching player-inventory items into their
- * assigned storage lanes.
- *
- * <p>Flow: IDLE → PLANNING → WALKING → OPENING → DEPOSITING → (repeat) → DONE
- *
- * <p>The sorter only processes inventory slots 9–35 (main inventory, hotbar
- * excluded). It skips any positions registered as supply or dump chests.
- */
+// State machine that deposits matching player-inventory items into their
+// assigned storage lanes.
+// Flow: IDLE -> PLANNING -> WALKING -> OPENING -> DEPOSITING -> DONE.
+// Only scans main-inventory slots 9-35 and skips supply or dump chest positions.
 public final class LaneSorter {
 
     private static final Logger LOGGER = LoggerFactory.getLogger("MOAR/LaneSorter");
@@ -67,15 +62,15 @@ public final class LaneSorter {
 
     private static final int OPEN_TIMEOUT_TICKS = 60;
     private static final int CLICK_COOLDOWN_TICKS = 3;
-    /** Number of hotbar slots excluded from inventory scanning. */
+    // Number of hotbar slots excluded from inventory scanning.
     private static final int HOTBAR_SIZE = 9;
 
     // ── Task model ────────────────────────────────────────────────────────────
 
-    /** A single deposit action: move matching items from player inv to {@code chestPos}. */
+    // A single deposit action into one chest position.
     private record DepositTask(BlockPos chestPos, String itemId, int laneId, String laneName) {}
 
-    /** Immutable plan built from the player's current inventory and accepted lanes. */
+    // Immutable plan built from the player's current inventory and accepted lanes.
     private record SortPlan(List<StorageLane> assignedLanes, List<DepositTask> tasks) {}
 
     private final Deque<DepositTask> taskQueue = new ArrayDeque<>();
@@ -98,7 +93,7 @@ public final class LaneSorter {
     public int getTotalTasks() { return totalTasks; }
     public int getCompletedTasks() { return completedTasks; }
 
-    /** Preview the current sort plan without walking or moving any items. */
+    // Preview the current sort plan without walking or moving any items.
     public boolean preview(List<StorageLane> lanes) {
         SortPlan plan = buildPlan(lanes);
         if (plan == null) return false;
@@ -129,7 +124,7 @@ public final class LaneSorter {
         return true;
     }
 
-    /** Begin sorting player inventory into the provided accepted lanes. */
+    // Begin sorting player inventory into the provided accepted lanes.
     public boolean start(List<StorageLane> lanes) {
         SortPlan plan = buildPlan(lanes);
         if (plan == null) return false;
@@ -212,7 +207,7 @@ public final class LaneSorter {
         return new SortPlan(List.copyOf(assigned), List.copyOf(tasks));
     }
 
-    /** Stop and reset. */
+    // Stop and reset.
     public void stop() {
         PathWalker.stop();
         /*? if >=26.1 {*//*
@@ -494,7 +489,7 @@ public final class LaneSorter {
 
     // ── Helpers ───────────────────────────────────────────────────────────────
 
-    /** All positions that must not be touched during sorting (supply + dump chests). */
+    // All positions that must not be touched during sorting (supply + dump chests).
     private static Set<BlockPos> getProtectedPositions() {
         Set<BlockPos> protected_ = new HashSet<>();
         protected_.addAll(MoarMod.getChestManager().getSupplyPositions());
@@ -502,7 +497,7 @@ public final class LaneSorter {
         return protected_;
     }
 
-    /** Determine which positions to deposit into based on lane DepositMode. */
+    // Determine which positions to deposit into based on lane DepositMode.
     private static List<BlockPos> getDepositTargets(StorageLane lane) {
         List<BlockPos> inputs = lane.getInputPositions();
         List<BlockPos> chests = lane.getChestPositions();
@@ -517,10 +512,7 @@ public final class LaneSorter {
         };
     }
 
-    /**
-     * Count how many items matching {@code itemId} the player holds in
-     * main inventory slots 9–35.
-     */
+    // Count how many matching items the player holds in main inventory slots 9-35.
     private static int countPlayerInventory(
             /*? if >=26.1 {*//*
             Minecraft mc,
@@ -542,7 +534,7 @@ public final class LaneSorter {
         return count;
     }
 
-    /** True when the open chest has at least one empty slot. */
+    // True when the open chest has at least one empty slot.
     private static boolean hasChestRoom(
             /*? if >=26.1 {*//*
             ChestMenu handler
@@ -565,7 +557,7 @@ public final class LaneSorter {
         return false;
     }
 
-    /** Rotate the player to face a world position. */
+    // Rotate the player to face a world position.
     private static void lookAt(
             /*? if >=26.1 {*//*
             LocalPlayer player, Vec3 target

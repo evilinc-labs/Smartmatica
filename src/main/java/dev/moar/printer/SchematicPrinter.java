@@ -223,7 +223,7 @@ public class SchematicPrinter {
     private BlockPos anchor;
     private int blocksPlaced;
     private String schematicFile;
-    /** Dimension the schematic was loaded in — pauses on dimension change. */
+    // Dimension the schematic was loaded in — pauses on dimension change.
     /*? if >=26.1 {*//*
     private ResourceKey<Level> buildDimension;
     *//*?} else {*/
@@ -237,11 +237,11 @@ public class SchematicPrinter {
     private BlockPos supplyTarget;
     private Set<String> neededItems;
     private int restockWaitTicks;
-    /** Ticks waiting for server to sync chest contents in RESTOCKING. */
+    // Ticks waiting for server to sync chest contents in RESTOCKING.
     private int chestSyncDelay;
-    /** Consecutive restock failures without grabbing any items. */
+    // Consecutive restock failures without grabbing any items.
     private int restockFailures;
-    /** Chests Baritone couldn't reach — LRU-evicted at 64. */
+    // Chests Baritone couldn't reach — LRU-evicted at 64.
     private final Set<BlockPos> unreachableChests = Collections.newSetFromMap(
             new LinkedHashMap<>(32, 0.75f, false) {
                 @Override protected boolean removeEldestEntry(Map.Entry<BlockPos, Boolean> eldest) {
@@ -252,7 +252,7 @@ public class SchematicPrinter {
     private int noProgressTicks;
     private Set<Item> lastMissingItems = new HashSet<>();
     private int missingItemMsgCooldown;
-    /** Items we've given up restocking — LRU-evicted at 64. */
+    // Items we've given up restocking — LRU-evicted at 64.
     private final Set<Item> skippedItems = Collections.newSetFromMap(
             new LinkedHashMap<>(16, 0.75f, false) {
                 @Override protected boolean removeEldestEntry(Map.Entry<Item, Boolean> eldest) {
@@ -265,12 +265,12 @@ public class SchematicPrinter {
                     return size() > 64;
                 }
             });
-    /** Consecutive walk failures — triggers GoalNear fallback. */
+    // Consecutive walk failures — triggers GoalNear fallback.
     private int walkFailCount;
     private static final int MAX_WALK_RETRIES = 3;
-    /** True if we already tried walkToWithPlacement and it failed — prevents retry loop. */
+    // True if we already tried walkToWithPlacement and it failed — prevents retry loop.
     private boolean triedPlacementWalk;
-    /** The target zone we last navigated toward — prevent re-targeting. */
+    // The target zone we last navigated toward — prevent re-targeting.
     private BlockPos lastWalkTargetZone;
     private int walkAttemptCooldown;
     private int stuckCycles;
@@ -278,23 +278,23 @@ public class SchematicPrinter {
     private int walkingSetbackPauseTicks;
     private int observedWalkingSetbacks;
     private static final int WALK_SETBACK_PAUSE_TICKS = 16;
-    /** Ticks until next skippedItems re-evaluation. */
+    // Ticks until next skippedItems re-evaluation.
     private int skippedItemRecheckCooldown;
     private static final int SKIPPED_RECHECK_INTERVAL = 200; // ~10s
-    /** Max consecutive server-rejected placements before repositioning. */
+    // Max consecutive server-rejected placements before repositioning.
     private static final int SERVER_REJECT_THRESHOLD = 6;
-    /** True during the redstone placement pass. */
+    // True during the redstone placement pass.
     private boolean redstonePass;
-    /** True during the liquid placement pass. */
+    // True during the liquid placement pass.
     private boolean liquidPass;
-    /** True if waypoint-based supply retry was already attempted. */
+    // True if waypoint-based supply retry was already attempted.
     private boolean triedWaypointRestock;
-    /** True if linear-waypoint supply retry was already attempted. */
+    // True if linear-waypoint supply retry was already attempted.
     private boolean triedLinearRestock;
-    /** True if placement-walk supply retry was already attempted. */
+    // True if placement-walk supply retry was already attempted.
     private boolean triedPlacementRestock;
 
-    /** Multi-phase descent: 0=none, 1=horizontal, 2=descend, 3=approach. */
+    // Multi-phase descent: 0=none, 1=horizontal, 2=descend, 3=approach.
     private int supplyDescentPhase;
     private BlockPos supplyDescentTarget;
 
@@ -314,13 +314,13 @@ public class SchematicPrinter {
     private int clearCooldownTicks;
     private int scaffoldCooldownTicks;
     private static final int BREAK_COOLDOWN_TICKS = 6;
-    /** Consecutive clearing failures — triggers stall recovery on threshold. */
+    // Consecutive clearing failures — triggers stall recovery on threshold.
     private int consecutiveClearFailures;
     private static final int MAX_CONSECUTIVE_CLEAR_FAILURES = 20;
-    /** Stall-recovery resets done — gives up after MAX. */
+    // Stall-recovery resets done — gives up after MAX.
     private int clearStallResets;
     private static final int MAX_CLEAR_STALL_RESETS = 3;
-    /** Unreachable clearing targets — LRU-evicted at 64. */
+    // Unreachable clearing targets — LRU-evicted at 64.
     private final Set<BlockPos> failedClearTargets = Collections.newSetFromMap(
             new LinkedHashMap<>(32, 0.75f, false) {
                 @Override protected boolean removeEldestEntry(Map.Entry<BlockPos, Boolean> eldest) {
@@ -329,7 +329,7 @@ public class SchematicPrinter {
             });
 
     // shulker unloading state
-    /** Sub-phase: 0=find, 1=swap, 2=place, 3=wait, 4=open, 5=take, 6=break, 7=breaking, 8=pickup. */
+    // Sub-phase: 0=find, 1=swap, 2=place, 3=wait, 4=open, 5=take, 6=break, 7=breaking, 8=pickup.
     private int shulkerUnloadPhase;
     private BlockPos shulkerPlacePos;
     private int shulkerUnloadTicks;
@@ -343,11 +343,11 @@ public class SchematicPrinter {
     private int shulkerSyncDelay;
     private int shulkerUnloadFailures;
     private static final int MAX_SHULKER_FAILURES = 3;
-    /** Skip shulker shortcut — walk to supply chest instead. */
+    // Skip shulker shortcut — walk to supply chest instead.
     private boolean shulkerNoSpaceSkipped;
     private int platformBuildAttempts;
     private static final int MAX_PLATFORM_ATTEMPTS = 3;
-    /** Platform block position — tracked for scaffold cleanup. */
+    // Platform block position — tracked for scaffold cleanup.
     private BlockPos platformBlockPos;
     private int shulkerOpenRetries;
     private static final int MAX_SHULKER_OPEN_RETRIES = 3;
@@ -355,26 +355,26 @@ public class SchematicPrinter {
     private int scaffoldScanCooldown;
 
     // dump state — depositing mined items during clearing
-    /** Position we were clearing before the dump detour. */
+    // Position we were clearing before the dump detour.
     private BlockPos preDumpClearPos;
-    /** The dump chest we're walking to / depositing into. */
+    // The dump chest we're walking to / depositing into.
     private BlockPos dumpTarget;
-    /** Ticks waiting for the dump chest screen to open. */
+    // Ticks waiting for the dump chest screen to open.
     private int dumpWaitTicks;
-    /** Ticks since the dump chest screen first appeared. */
+    // Ticks since the dump chest screen first appeared.
     private int dumpSyncDelay;
     private static final int DUMP_SYNC_DELAY = 3;
 
     private int placementCheckCooldown;
 
-    /** Ticks until next anchor correlation check (starts at 1). */
+    // Ticks until next anchor correlation check (starts at 1).
     private int anchorCorrelationCooldown;
-    /** Interval (ticks) between automatic SchematicWorld anchor checks. */
+    // Interval (ticks) between automatic SchematicWorld anchor checks.
     private static final int ANCHOR_CORRELATION_INTERVAL = 200;
-    /** Whether the anchor has been confirmed via SchematicWorld correlation. */
+    // Whether the anchor has been confirmed via SchematicWorld correlation.
     private boolean anchorCorrelated;
 
-    /** True when loaded via Litematica auto-detect. */
+    // True when loaded via Litematica auto-detect.
     private boolean autoDetected;
 
     private static final int RESTOCK_THRESHOLD = 64;
@@ -382,12 +382,12 @@ public class SchematicPrinter {
     private static final int CHEST_OPEN_TIMEOUT = 40;
     private static final int IDLE_SCAN_INTERVAL = 200;
     private static final int NO_PROGRESS_TIMEOUT = 100;
-    /** Delay for server to sync chest contents after screen opens. */
+    // Delay for server to sync chest contents after screen opens.
     private static final int CHEST_SYNC_DELAY = 3;
     private static final int MAX_RESTOCK_FAILURES = 6;
 
     // cached schematic scan results
-    /** TTL for full-schematic remaining-block scans. */
+    // TTL for full-schematic remaining-block scans.
     private static final int REMAINING_CACHE_TTL = 100; // ~5 seconds
     private long remainingCacheTick = Long.MIN_VALUE;
     private int  cachedCountRemaining = -1;
@@ -567,7 +567,7 @@ public class SchematicPrinter {
         }
     }
 
-    /** Release all accumulated state on world disconnect to prevent leaks. */
+    // Release all accumulated state on world disconnect to prevent leaks.
     public void onDisconnect() {
         if (enabled) disable();
         unreachableChests.clear();
@@ -702,7 +702,7 @@ public class SchematicPrinter {
         }
     }
 
-    /** Syncs anchor to the matching Litematica placement origin. */
+    // Syncs anchor to the matching Litematica placement origin.
     private boolean trySyncAnchor() {
         if (schematic == null || schematicFile == null) return false;
 
@@ -763,10 +763,8 @@ public class SchematicPrinter {
         return true;
     }
 
-    /**
-     * Check whether the current schematic is still present as an enabled
-     * placement in Litematica.  Used by the periodic tick() validation.
-     */
+    // Check whether the current schematic is still present as an enabled
+    // placement in Litematica.  Used by the periodic tick() validation.
     private boolean isPlacementStillActive() {
         if (schematicFile == null) return false;
 
@@ -799,11 +797,9 @@ public class SchematicPrinter {
         return null;
     }
 
-    /**
-     * Warn the player if the current anchor looks suspicious — e.g. very
-     * far from the player or sitting at world origin (0, y, 0), which is
-     * almost always an un-moved default Litematica placement.
-     */
+    // Warn the player if the current anchor looks suspicious — e.g. very
+    // far from the player or sitting at world origin (0, y, 0), which is
+    // almost always an un-moved default Litematica placement.
     private void warnIfAnchorSuspicious() {
         if (anchor == null) return;
         /*? if >=26.1 {*//*
@@ -886,11 +882,9 @@ public class SchematicPrinter {
     public LitematicaSchematic getSchematic()          { return schematic; }
     public BlockPos getAnchor()                       { return anchor; }
 
-    /**
-     * Updates the build anchor.  If AutoBuild is actively walking to a
-     * build zone, the walk is cancelled and the state machine resets to
-     * BUILDING so the next tick re-evaluates from the new anchor.
-     */
+    // Updates the build anchor.  If AutoBuild is actively walking to a
+    // build zone, the walk is cancelled and the state machine resets to
+    // BUILDING so the next tick re-evaluates from the new anchor.
     public void setAnchor(BlockPos newAnchor) {
         BlockPos old = this.anchor;
         this.anchor = newAnchor;
@@ -1595,10 +1589,8 @@ public class SchematicPrinter {
         }
     }
 
-    /**
-     * Handles the situation where blocks need placing but none of the
-     * required items are in the player's inventory.
-     */
+    // Handles the situation where blocks need placing but none of the
+    // required items are in the player's inventory.
     /*? if >=26.1 {*//*
     private void handleMissingItems(Minecraft mc) {
     *//*?} else {*/
@@ -1634,7 +1626,7 @@ public class SchematicPrinter {
         // Stay in BUILDING — tryPlaceNextBlock will skip these items
     }
 
-    /** Finds the next build zone and starts walking to it. */
+    // Finds the next build zone and starts walking to it.
     /*? if >=26.1 {*//*
     private boolean tryWalkToNextZone(Minecraft mc) {
     *//*?} else {*/
@@ -2143,10 +2135,8 @@ public class SchematicPrinter {
         PathWalker.tick();
     }
 
-    /**
-     * Records nearby blocks Baritone placed as scaffold (matches throwaway
-     * items + schematic expects air). Called during placement walks.
-     */
+    // Records nearby blocks Baritone placed as scaffold (matches throwaway
+    // items + schematic expects air). Called during placement walks.
     /*? if >=26.1 {*//*
     private void scanForScaffoldBlocks(LocalPlayer player, Level world) {
     *//*?} else {*/
@@ -2207,10 +2197,8 @@ public class SchematicPrinter {
     // tryPlaceNextBlock.  Building fills air with blocks; clearing
     // fills blocks with air.
 
-    /**
-     * Scan blocks within reach and break the nearest illegal one.
-     * Mirrors tryPlaceNextBlock() but breaks instead of placing.
-     */
+    // Scan blocks within reach and break the nearest illegal one.
+    // Mirrors tryPlaceNextBlock() but breaks instead of placing.
     /*? if >=26.1 {*//*
     private boolean tryClearNextBlock(LocalPlayer player, Level world) {
     *//*?} else {*/
@@ -2350,12 +2338,10 @@ public class SchematicPrinter {
         return true;
     }
 
-    /**
-     * Find the nearest illegal block in the schematic — mirrors
-     * findNextBuildZone().  Used as a walk target when nothing is
-     * within reach.  Prefers highest Y (top-down clearing), then
-     * nearest to player.
-     */
+    // Find the nearest illegal block in the schematic — mirrors
+    // findNextBuildZone().  Used as a walk target when nothing is
+    // within reach.  Prefers highest Y (top-down clearing), then
+    // nearest to player.
     /*? if >=26.1 {*//*
     private BlockPos findNextClearTarget(LocalPlayer player, Level world) {
     *//*?} else {*/
@@ -2432,13 +2418,11 @@ public class SchematicPrinter {
         return best;
     }
 
-    /**
-     * Clears illegal blocks from the schematic footprint.
-     * Mirrors the building tick: try breaking in-reach blocks first
-     * (tryClearNextBlock), then walk to the nearest remaining illegal
-     * block if nothing is nearby.  Building fills air → blocks;
-     * clearing fills blocks → air.
-     */
+    // Clears illegal blocks from the schematic footprint.
+    // Mirrors the building tick: try breaking in-reach blocks first
+    // (tryClearNextBlock), then walk to the nearest remaining illegal
+    // block if nothing is nearby.  Building fills air → blocks;
+    // clearing fills blocks → air.
     /*? if >=26.1 {*//*
     private void tickClearingArea(Minecraft mc) {
     *//*?} else {*/
@@ -2658,7 +2642,7 @@ public class SchematicPrinter {
         autoState = AutoState.WALKING_TO_CLEAR;
     }
 
-    /** Breaks scaffold blocks one at a time until all are removed. */
+    // Breaks scaffold blocks one at a time until all are removed.
     /*? if >=26.1 {*//*
     private void tickCleaningScaffold(Minecraft mc) {
     *//*?} else {*/
@@ -3381,7 +3365,7 @@ public class SchematicPrinter {
 
     // SHULKER UNLOADING — place → open → take items → break → pickup
 
-    /** Finds the first inventory shulker containing needed items, or -1. */
+    // Finds the first inventory shulker containing needed items, or -1.
     /*? if >=26.1 {*//*
     private int findShulkerWithNeededItems(LocalPlayer player) {
     *//*?} else {*/
@@ -3406,7 +3390,7 @@ public class SchematicPrinter {
         return -1;
     }
 
-    /** Finds a valid nearby position to place a shulker box. */
+    // Finds a valid nearby position to place a shulker box.
     /*? if >=26.1 {*//*
     private BlockPos findShulkerPlaceSpot(LocalPlayer player, Level world) {
     *//*?} else {*/
@@ -3511,10 +3495,8 @@ public class SchematicPrinter {
                 || b instanceof HopperBlock;
     }
 
-    /**
-     * Places a solid block adjacent to the player to create a shulker platform.
-     * Used when findShulkerPlaceSpot returns null (narrow pillar/ledge).
-     */
+    // Places a solid block adjacent to the player to create a shulker platform.
+    // Used when findShulkerPlaceSpot returns null (narrow pillar/ledge).
     /*? if >=26.1 {*//*
     private boolean tryBuildShulkerPlatform(LocalPlayer player,
     *//*?} else {*/
@@ -3793,19 +3775,17 @@ public class SchematicPrinter {
         return true;
     }
 
-    /**
-     * State machine for unloading shulker boxes grabbed from the supply
-     * chest.  Phases:
-     *   0 — find next shulker with needed items in inventory
-     *   1 — select/swap shulker into hotbar (wait 1 tick for server)
-     *   2 — place the shulker on the ground
-     *   3 — wait for server to register the placed shulker block
-     *   4 — open the shulker (interact with it)
-     *   5 — take needed items from the open shulker screen
-     *   6 — close screen, start breaking the shulker
-     *   7 — continue breaking until it drops
-     *   8 — wait for the item entity to be picked up
-     */
+    // State machine for unloading shulker boxes grabbed from the supply
+    // chest.  Phases:
+    //   0 — find next shulker with needed items in inventory
+    //   1 — select/swap shulker into hotbar (wait 1 tick for server)
+    //   2 — place the shulker on the ground
+    //   3 — wait for server to register the placed shulker block
+    //   4 — open the shulker (interact with it)
+    //   5 — take needed items from the open shulker screen
+    //   6 — close screen, start breaking the shulker
+    //   7 — continue breaking until it drops
+    //   8 — wait for the item entity to be picked up
     /*? if >=26.1 {*//*
     private void tickUnloadingShulker(Minecraft mc) {
     *//*?} else {*/
@@ -4505,10 +4485,8 @@ public class SchematicPrinter {
         }
     }
 
-    /**
-     * Finishes the shulker unloading process and transitions to the
-     * appropriate next state (walk back to build zone or resume building).
-     */
+    // Finishes the shulker unloading process and transitions to the
+    // appropriate next state (walk back to build zone or resume building).
     /*? if >=26.1 {*//*
     private void finishShulkerUnloading(Minecraft mc) {
     *//*?} else {*/
@@ -4704,10 +4682,8 @@ public class SchematicPrinter {
         }
     }
 
-    /**
-     * Returns true if the world block at this position matches
-     * the schematic's expected block (i.e. it's correctly placed).
-     */
+    // Returns true if the world block at this position matches
+    // the schematic's expected block (i.e. it's correctly placed).
     /*? if >=26.1 {*//*
     private boolean isCorrectSchematicBlock(BlockPos worldPos, Level world) {
     *//*?} else {*/
@@ -4722,10 +4698,8 @@ public class SchematicPrinter {
         return isEffectivelyPlaced(world.getBlockState(worldPos), expected);
     }
 
-    /**
-     * Finds the lowest unbuilt block above the player's reach.
-     * Among same-Y candidates, prefers nearest by horizontal distance.
-     */
+    // Finds the lowest unbuilt block above the player's reach.
+    // Among same-Y candidates, prefers nearest by horizontal distance.
     /*? if >=26.1 {*//*
     private BlockPos findHighBuildZone(LocalPlayer player, Level world) {
     *//*?} else {*/
@@ -5020,11 +4994,9 @@ public class SchematicPrinter {
         }
     }
 
-    /**
-     * Builds greedy nearest-neighbour waypoints from player to supply
-     * chest using known database positions (other chests + scaffold).
-     * Last entry is always the chest itself.
-     */
+    // Builds greedy nearest-neighbour waypoints from player to supply
+    // chest using known database positions (other chests + scaffold).
+    // Last entry is always the chest itself.
     private List<BlockPos> computeSupplyWaypoints(BlockPos from, BlockPos to) {
         // 1. Collect all known positions from the database
         List<BlockPos> candidates = new ArrayList<>();
@@ -5133,7 +5105,7 @@ public class SchematicPrinter {
         return waypoints;
     }
 
-    /** Splits a long path into fixed-length legs for Baritone. */
+    // Splits a long path into fixed-length legs for Baritone.
     private List<BlockPos> computeLinearWaypoints(BlockPos from, BlockPos to, int legLength) {
         List<BlockPos> waypoints = new ArrayList<>();
         double dx = to.getX() - from.getX();
@@ -5167,11 +5139,9 @@ public class SchematicPrinter {
         return waypoints;
     }
 
-    /**
-     * Walks to a build zone with placement enabled.  For vertical paths,
-     * uses horizontal-then-vertical phasing.  For horizontal, uses
-     * linear interpolation legs.
-     */
+    // Walks to a build zone with placement enabled.  For vertical paths,
+    // uses horizontal-then-vertical phasing.  For horizontal, uses
+    // linear interpolation legs.
     /*? if >=26.1 {*//*
     private void walkToZoneWithPlacement(LocalPlayer player,
     *//*?} else {*/
@@ -5499,7 +5469,7 @@ public class SchematicPrinter {
         /*?}*/
     }
 
-    /** Finds nearby chest/barrel/shulker as fallback when exact pos is stale. */
+    // Finds nearby chest/barrel/shulker as fallback when exact pos is stale.
     /*? if >=26.1 {*//*
     private BlockPos findNearbyChest(Level world, BlockPos center, int radius) {
     *//*?} else {*/
@@ -5822,10 +5792,8 @@ public class SchematicPrinter {
         return best;
     }
 
-    /**
-     * Finds the nearest non-air schematic block in unloaded chunks.
-     * Walking toward the result loads the chunk for placement.
-     */
+    // Finds the nearest non-air schematic block in unloaded chunks.
+    // Walking toward the result loads the chunk for placement.
     /*? if >=26.1 {*//*
     private BlockPos findUnloadedBuildZone(LocalPlayer player, Level world) {
     *//*?} else {*/
@@ -5883,7 +5851,7 @@ public class SchematicPrinter {
 
     // PLACEMENT HELPERS
 
-    /** Formats items as a chat string (up to 5 names + overflow). */
+    // Formats items as a chat string (up to 5 names + overflow).
     private static String formatMissingItems(Set<Item> items) {
         if (items == null || items.isEmpty()) return "§7(none)";
         StringBuilder sb = new StringBuilder();
@@ -5904,7 +5872,7 @@ public class SchematicPrinter {
         return sb.toString();
     }
 
-    /** Formats item IDs as a chat string, resolving display names. */
+    // Formats item IDs as a chat string, resolving display names.
     private static String formatNeededItemIds(Set<String> itemIds) {
         if (itemIds == null || itemIds.isEmpty()) return "§7(none)";
         StringBuilder sb = new StringBuilder();
@@ -5937,7 +5905,7 @@ public class SchematicPrinter {
         return shown == 0 ? "§7(unknown items)" : sb.toString();
     }
 
-    /** Adds neededItems IDs to skippedItems so tryPlaceNextBlock skips them. */
+    // Adds neededItems IDs to skippedItems so tryPlaceNextBlock skips them.
     private void addNeededToSkipped() {
         for (String id : neededItems) {
             /*? if >=26.1 {*//*
@@ -5957,7 +5925,7 @@ public class SchematicPrinter {
         }
     }
 
-    /** Counts unplaced schematic blocks whose item is in skippedItems. */
+    // Counts unplaced schematic blocks whose item is in skippedItems.
     /*? if >=26.1 {*//*
     private int countSkippedBlocks(Level world) {
     *//*?} else {*/
@@ -5997,11 +5965,9 @@ public class SchematicPrinter {
         return count;
     }
 
-    /**
-     * Returns true if the given block state can actually be placed
-     * by a player (i.e. has a corresponding BlockItem).
-     * Filters out liquids (water, lava), fire, portals, light blocks, etc.
-     */
+    // Returns true if the given block state can actually be placed
+    // by a player (i.e. has a corresponding BlockItem).
+    // Filters out liquids (water, lava), fire, portals, light blocks, etc.
     private static boolean isPlaceable(BlockState state) {
         /*? if >=26.1 {*//*
         if (state.getBlock() instanceof LiquidBlock) return false;
@@ -6015,11 +5981,9 @@ public class SchematicPrinter {
         return state.getBlock().asItem() != Items.AIR;
     }
 
-    /**
-     * Returns true if the given block state is a placeable liquid
-     * source block (water or lava with level 0).  Flowing liquid (level > 0)
-     * is auto-generated and should not be individually placed.
-     */
+    // Returns true if the given block state is a placeable liquid
+    // source block (water or lava with level 0).  Flowing liquid (level > 0)
+    // is auto-generated and should not be individually placed.
     private static boolean isLiquidSource(BlockState state) {
         /*? if >=26.1 {*//*
         return state.getBlock() instanceof LiquidBlock
@@ -6033,10 +5997,8 @@ public class SchematicPrinter {
             /*?}*/
     }
 
-    /**
-     * Returns true if the schematic contains any liquid source blocks
-     * that have not yet been placed in the world.
-     */
+    // Returns true if the schematic contains any liquid source blocks
+    // that have not yet been placed in the world.
     /*? if >=26.1 {*//*
     private boolean hasRemainingLiquids(Level world) {
     *//*?} else {*/
@@ -6083,7 +6045,7 @@ public class SchematicPrinter {
         return false;
     }
 
-    /** True if unplaced solid blocks remain in the schematic (TTL-cached). */
+    // True if unplaced solid blocks remain in the schematic (TTL-cached).
     /*? if >=26.1 {*//*
     private boolean hasRemainingSolids(Level world) {
     *//*?} else {*/
@@ -6136,7 +6098,7 @@ public class SchematicPrinter {
         return false;
     }
 
-    /** True if unplaced redstone components remain (TTL-cached). */
+    // True if unplaced redstone components remain (TTL-cached).
     /*? if >=26.1 {*//*
     private boolean hasRemainingRedstone(Level world) {
     *//*?} else {*/
@@ -6186,10 +6148,8 @@ public class SchematicPrinter {
         return false;
     }
 
-    /**
-     * Returns the bucket Item required to place the given fluid
-     * block state, or null if the state is not a supported fluid.
-     */
+    // Returns the bucket Item required to place the given fluid
+    // block state, or null if the state is not a supported fluid.
     private static Item getLiquidBucketItem(BlockState state) {
         Block block = state.getBlock();
         if (block == Blocks.WATER) return Items.WATER_BUCKET;
@@ -6197,10 +6157,8 @@ public class SchematicPrinter {
         return null;
     }
 
-    /**
-     * Auto-created block parts that should NOT be individually placed
-     * (door upper, bed head, tall plant upper).
-     */
+    // Auto-created block parts that should NOT be individually placed
+    // (door upper, bed head, tall plant upper).
     private static boolean isAutoCreatedPart(BlockState state) {
         Block block = state.getBlock();
         if (block instanceof DoorBlock
@@ -6249,11 +6207,9 @@ public class SchematicPrinter {
         return false;
     }
 
-    /**
-     * Checks if existing block matches desired, ignoring neighbor-computed
-     * dynamic properties (stair shape, fence connections, door open state,
-     * redstone power, etc.).
-     */
+    // Checks if existing block matches desired, ignoring neighbor-computed
+    // dynamic properties (stair shape, fence connections, door open state,
+    // redstone power, etc.).
     private static boolean isEffectivelyPlaced(BlockState existing, BlockState desired) {
         if (existing.equals(desired)) return true;
         if (existing.getBlock() != desired.getBlock()) return false;
@@ -6420,10 +6376,8 @@ public class SchematicPrinter {
         return false;
     }
 
-    /**
-     * Returns true if both states have the same value for the given
-     * property, or if either state does not contain the property.
-     */
+    // Returns true if both states have the same value for the given
+    // property, or if either state does not contain the property.
     private static <T extends Comparable<T>> boolean propMatches(
             BlockState a, BlockState b, Property<T> prop) {
         /*? if >=26.1 {*//*
@@ -6438,10 +6392,8 @@ public class SchematicPrinter {
         /*?}*/
     }
 
-    /**
-     * Returns true if the given position is near any previously
-     * failed build zone.
-     */
+    // Returns true if the given position is near any previously
+    // failed build zone.
     private boolean isNearFailedZone(BlockPos pos) {
         // Use the build reach distance as the exclusion radius.
         // If we can't path to one point, all blocks within our reach
@@ -6457,10 +6409,8 @@ public class SchematicPrinter {
         return false;
     }
 
-    /**
-     * Returns true if the player's bounding box overlaps the given
-     * block position.  Placing a block here would push the player out.
-     */
+    // Returns true if the player's bounding box overlaps the given
+    // block position.  Placing a block here would push the player out.
     /*? if >=26.1 {*//*
     private static boolean playerOverlapsBlock(LocalPlayer player, BlockPos pos) {
     *//*?} else {*/
@@ -6489,10 +6439,8 @@ public class SchematicPrinter {
                pz + halfW > pos.getZ() && pz - halfW < pos.getZ() + 1;
     }
 
-    /**
-     * Finds a safe standing position near target within placement reach.
-     * Needs solid ground, clear head room, and outside the build footprint.
-     */
+    // Finds a safe standing position near target within placement reach.
+    // Needs solid ground, clear head room, and outside the build footprint.
     /*? if >=26.1 {*//*
     private BlockPos findStandingPosition(BlockPos target, Level world, LocalPlayer player) {
     *//*?} else {*/
@@ -6645,10 +6593,8 @@ public class SchematicPrinter {
         return best;
     }
 
-    /**
-     * Simple ground check: walks a straight line from start to end
-     * at destination Y, verifying solid ground at each step.
-     */
+    // Simple ground check: walks a straight line from start to end
+    // at destination Y, verifying solid ground at each step.
     /*? if >=26.1 {*//*
     private static boolean hasGroundPath(BlockPos from, BlockPos to, Level world) {
     *//*?} else {*/
@@ -6687,11 +6633,9 @@ public class SchematicPrinter {
         return true;
     }
 
-    /**
-     * Returns true if the given world position corresponds to an
-     * unbuilt schematic block (the schematic expects a block there but the
-     * world doesn't have it yet).
-     */
+    // Returns true if the given world position corresponds to an
+    // unbuilt schematic block (the schematic expects a block there but the
+    // world doesn't have it yet).
     /*? if >=26.1 {*//*
     private boolean isUnbuiltSchematicBlock(BlockPos worldPos, Level world) {
     *//*?} else {*/
@@ -6711,16 +6655,14 @@ public class SchematicPrinter {
 
     // ENTRAPMENT SAFETY
 
-    /** Cardinal directions the player can walk through. */
+    // Cardinal directions the player can walk through.
     private static final Direction[] HORIZONTALS = {
             Direction.NORTH, Direction.SOUTH, Direction.EAST, Direction.WEST
     };
 
-    /**
-     * Whether a block state allows safe walking through it.
-     * Excludes liquids — water/lava are technically passable but not
-     * safe exits (player would swim / take damage).
-     */
+    // Whether a block state allows safe walking through it.
+    // Excludes liquids — water/lava are technically passable but not
+    // safe exits (player would swim / take damage).
     private static boolean isPassable(BlockState state) {
         if (!state.getFluidState().isEmpty()) return false;
         /*? if >=26.1 {*//*
@@ -6730,12 +6672,10 @@ public class SchematicPrinter {
         /*?}*/
     }
 
-    /**
-     * Whether a block state physically blocks movement.  Unlike
-     * isPassable, this treats fluids as non-blocking because
-     * the player can swim through them.  Used for entrapment detection
-     * where we only care about solid walls, not water.
-     */
+    // Whether a block state physically blocks movement.  Unlike
+    // isPassable, this treats fluids as non-blocking because
+    // the player can swim through them.  Used for entrapment detection
+    // where we only care about solid walls, not water.
     private static boolean isMovementBlocking(BlockState state) {
         /*? if >=26.1 {*//*
         if (state.isAir() || state.canBeReplaced()) return false;
@@ -6750,15 +6690,12 @@ public class SchematicPrinter {
         /*?}*/
     }
 
-    /**
-     * Returns true if placing a block at pos would seal
-     * the player's last walkable horizontal exit.
-     *
-     * Only relevant when the candidate block is in the player's
-     * "exit ring" — one of the 4 cardinal neighbours at feet or head
-     * level.  If placing it would drop the exit count from ≥1 to 0,
-     * the placement is vetoed.
-     */
+    // Returns true if placing a block at pos would seal
+    // the player's last walkable horizontal exit.
+    // Only relevant when the candidate block is in the player's
+    // "exit ring" — one of the 4 cardinal neighbours at feet or head
+    // level.  If placing it would drop the exit count from ≥1 to 0,
+    // the placement is vetoed.
     /*? if >=26.1 {*//*
     private static boolean wouldTrapPlayer(LocalPlayer player,
     *//*?} else {*/
@@ -6816,15 +6753,12 @@ public class SchematicPrinter {
         return exitsBefore > 0 && exitsAfter == 0;
     }
 
-    /**
-     * Returns true if the player currently has no
-     * walkable horizontal exit (all 4 cardinal directions are blocked
-     * at either feet or head level by solid blocks).
-     *
-     * Fluids do NOT count as entrapment — the player can swim
-     * through water/lava even though it's undesirable.  Only solid
-     * blocks that physically prevent horizontal movement trigger this.
-     */
+    // Returns true if the player currently has no
+    // walkable horizontal exit (all 4 cardinal directions are blocked
+    // at either feet or head level by solid blocks).
+    // Fluids do NOT count as entrapment — the player can swim
+    // through water/lava even though it's undesirable.  Only solid
+    // blocks that physically prevent horizontal movement trigger this.
     /*? if >=26.1 {*//*
     private static boolean isPlayerTrapped(LocalPlayer player,
     *//*?} else {*/
@@ -6859,12 +6793,10 @@ public class SchematicPrinter {
         return true;
     }
 
-    /**
-     * Returns true if the given feet position has at least one
-     * horizontal exit direction that is currently clear and
-     * will remain clear after the schematic is fully built (i.e. the
-     * exit blocks are not unbuilt schematic positions).
-     */
+    // Returns true if the given feet position has at least one
+    // horizontal exit direction that is currently clear and
+    // will remain clear after the schematic is fully built (i.e. the
+    // exit blocks are not unbuilt schematic positions).
     /*? if >=26.1 {*//*
     private boolean hasEscapeRoute(BlockPos feetPos, Level world) {
     *//*?} else {*/
@@ -6896,12 +6828,10 @@ public class SchematicPrinter {
         return false;
     }
 
-    /**
-     * Returns true if any block within 2 horizontal blocks of
-     * feetPos (at feet or head level) contains flowing water or
-     * lava.  Flowing liquids push the player, breaking Baritone's
-     * pathfinding — so standing positions near them should be avoided.
-     */
+    // Returns true if any block within 2 horizontal blocks of
+    // feetPos (at feet or head level) contains flowing water or
+    // lava.  Flowing liquids push the player, breaking Baritone's
+    // pathfinding — so standing positions near them should be avoided.
     /*? if >=26.1 {*//*
     private static boolean hasFlowingWaterNearby(BlockPos feetPos, Level world) {
     *//*?} else {*/
@@ -6929,10 +6859,8 @@ public class SchematicPrinter {
         return false;
     }
 
-    /**
-     * Finds an escape position outside an enclosed area.  Searches outward
-     * up to 8 blocks, accepting water positions unlike findStandingPosition.
-     */
+    // Finds an escape position outside an enclosed area.  Searches outward
+    // up to 8 blocks, accepting water positions unlike findStandingPosition.
     /*? if >=26.1 {*//*
     private BlockPos findEscapePosition(LocalPlayer player,
     *//*?} else {*/

@@ -20,19 +20,9 @@ import org.slf4j.LoggerFactory;
 
 import java.util.*;
 
-/**
- * Top-level coordinator for the storage-lane feature.
- *
- * <p>Lifecycle:
- * <ol>
- *   <li>Set region corners via {@link #setCorner1} / {@link #setCorner2}.</li>
- *   <li>Call {@link #scan()} to populate {@link #pendingLanes} (in-memory only).</li>
- *   <li>Optionally call {@link #preview()} to inspect the results.</li>
- *   <li>Call {@link #accept()} to persist pending lanes to the database and
- *       promote them to {@link #acceptedLanes}.</li>
- *   <li>Use {@link #startSort()} to begin inventory sorting.</li>
- * </ol>
- */
+// Top-level coordinator for the storage-lane feature.
+// Typical flow: set region corners, scan for pending lanes, preview results,
+// accept them into the database, then start sorting against accepted lanes.
 public final class LaneManager {
 
     private static final Logger LOGGER = LoggerFactory.getLogger("MOAR/LaneManager");
@@ -44,10 +34,10 @@ public final class LaneManager {
 
     // ── Lane collections ──────────────────────────────────────────────────────
 
-    /** Lanes inferred by the last scan but not yet accepted/persisted. */
+    // Lanes inferred by the last scan but not yet accepted/persisted.
     private final List<StorageLane> pendingLanes = new ArrayList<>();
 
-    /** Accepted (persisted) lanes, loaded from DB on startup and updated on accept. */
+    // Accepted (persisted) lanes, loaded from DB on startup and updated on accept.
     private final List<StorageLane> acceptedLanes = new ArrayList<>();
 
     // ── Sub-systems ───────────────────────────────────────────────────────────
@@ -77,10 +67,8 @@ public final class LaneManager {
 
     // ── Public API — scan ─────────────────────────────────────────────────────
 
-    /**
-     * Synchronously scan the configured region for storage lanes.
-     * Populates {@link #pendingLanes} (existing pending lanes are discarded).
-     */
+    // Synchronously scan the configured region for storage lanes.
+    // Replaces any existing pending lanes.
     public void scan() {
         /*? if >=26.1 {*//*
         Minecraft mc = Minecraft.getInstance();
@@ -129,7 +117,7 @@ public final class LaneManager {
 
     // ── Public API — preview ──────────────────────────────────────────────────
 
-    /** Print all pending lanes to chat. */
+    // Print all pending lanes to chat.
     public void preview() {
         if (pendingLanes.isEmpty()) {
             ChatHelper.labelled("Lanes", "§cNo pending scan results. Run §f/stash lanes scan §cfirst.");
@@ -144,10 +132,7 @@ public final class LaneManager {
 
     // ── Public API — accept ───────────────────────────────────────────────────
 
-    /**
-     * Persist all pending lanes to the database and add them to
-     * {@link #acceptedLanes}.
-     */
+    // Persist all pending lanes to the database and add them to accepted lanes.
     public void accept() {
         if (pendingLanes.isEmpty()) {
             ChatHelper.labelled("Lanes", "§cNo pending lanes to accept.");
@@ -172,7 +157,7 @@ public final class LaneManager {
 
     // ── Public API — list ─────────────────────────────────────────────────────
 
-    /** Print all accepted lanes to chat. */
+    // Print all accepted lanes to chat.
     public void list() {
         if (acceptedLanes.isEmpty()) {
             ChatHelper.labelled("Lanes", "§cNo accepted lanes. Run §f/stash lanes scan§c → "
@@ -187,7 +172,7 @@ public final class LaneManager {
 
     // ── Public API — clear ────────────────────────────────────────────────────
 
-    /** Wipe all accepted lanes from memory and the database. */
+    // Wipe all accepted lanes from memory and the database.
     public void clearLanes() {
         StashDatabase db = getOpenDatabase();
         if (db != null) db.clearAllLanes();
@@ -198,13 +183,7 @@ public final class LaneManager {
 
     // ── Public API — assign ───────────────────────────────────────────────────
 
-    /**
-     * Assign {@code itemId} to the lane that owns {@code pos}.
-     *
-     * @param pos    a chest position belonging to the target lane
-     * @param itemId the item identifier to assign
-     * @return true when a lane was found and updated
-     */
+    // Assign an item ID to the lane that owns the given chest position.
     public boolean assignItem(BlockPos pos, String itemId) {
         StorageLane target = findLaneByChest(pos);
         if (target == null) return false;
@@ -218,7 +197,7 @@ public final class LaneManager {
         return true;
     }
 
-    /** Find a pending lane containing {@code pos}. */
+    // Find a pending lane containing the given chest position.
     public StorageLane findPendingLaneByChest(BlockPos pos) {
         for (StorageLane lane : pendingLanes) {
             if (lane.containsChest(pos)) return lane;
@@ -226,7 +205,7 @@ public final class LaneManager {
         return null;
     }
 
-    /** Find an accepted lane containing {@code pos}. */
+    // Find an accepted lane containing the given chest position.
     public StorageLane findLaneByChest(BlockPos pos) {
         for (StorageLane lane : acceptedLanes) {
             if (lane.containsChest(pos)) return lane;
@@ -236,7 +215,7 @@ public final class LaneManager {
 
     // ── Public API — sort ─────────────────────────────────────────────────────
 
-    /** Start the lane sorter with all currently accepted lanes. */
+    // Start the lane sorter with all currently accepted lanes.
     public boolean startSort() {
         if (sorter.isActive()) {
             ChatHelper.labelled("Lanes", "§cSort already in progress. Use §f/stash lanes sort stop §cto cancel.");
@@ -245,12 +224,12 @@ public final class LaneManager {
         return sorter.start(acceptedLanes);
     }
 
-    /** Preview the current sort plan without executing it. */
+    // Preview the current sort plan without executing it.
     public boolean previewSort() {
         return sorter.preview(acceptedLanes);
     }
 
-    /** Abort an in-progress sort. */
+    // Abort an in-progress sort.
     public void stopSort() {
         if (sorter.isActive()) {
             sorter.stop();
@@ -459,10 +438,8 @@ public final class LaneManager {
 
     // ── Lifecycle ─────────────────────────────────────────────────────────────
 
-    /**
-     * Load persisted lanes from the database.
-     * Call once after the database is opened at mod init.
-     */
+    // Load persisted lanes from the database.
+    // Call once after the database is opened at mod init.
     public void loadFromDatabase() {
         StashDatabase db = MoarMod.getDatabase();
         if (db == null || !db.isOpen()) return;
@@ -476,12 +453,12 @@ public final class LaneManager {
         }
     }
 
-    /** Tick the sorter state machine. Call from the client tick event. */
+    // Tick the sorter state machine. Call from the client tick event.
     public void tick() {
         sorter.tick();
     }
 
-    /** Reset all runtime state (call on world disconnect). */
+    // Reset all runtime state (call on world disconnect).
     public void stop() {
         if (sorter.isActive()) sorter.stop();
         pendingLanes.clear();

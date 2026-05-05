@@ -19,31 +19,16 @@ import net.minecraft.util.math.Box;
 
 import java.util.*;
 
-/**
- * Provides preview and run actions for the lane-labeling feature:
- * <ol>
- *   <li><b>preview</b> — prints which lanes are missing labels and which item
- *       would be placed in a frame.</li>
- *   <li><b>run</b> — (stub; will be implemented in a future version) places
- *       item frames and inserts the lane's item.</li>
- * </ol>
- *
- * <p>The run phase is intentionally conservative:
- * <ul>
- *   <li>It will not overwrite existing item frames that already hold an item.</li>
- *   <li>It will not place frames if the player does not hold an item frame in
- *       their main inventory.</li>
- * </ul>
- */
+// Provides preview and run actions for lane labeling.
+// Preview reports which lanes are missing labels and which item each frame would show.
+// Run is still a stub for future item-frame placement support.
+// When run is implemented, it should avoid overwriting filled frames and should
+// require the player to carry item frames in main inventory.
 public final class LaneLabeler {
 
     private LaneLabeler() {}
 
-    /**
-     * Print a preview of labeling actions that would be performed.
-     *
-     * @param lanes the accepted storage lanes to inspect
-     */
+    // Print the labeling actions that would be performed.
     public static void preview(List<StorageLane> lanes) {
         if (lanes.isEmpty()) {
             ChatHelper.labelled("Lanes", "§cNo accepted lanes. Nothing to label.");
@@ -94,13 +79,8 @@ public final class LaneLabeler {
         }
     }
 
-    /**
-     * Stub for the labeling run phase.
-     *
-     * <p>Full implementation is deferred — automatic item-frame placement
-     * requires careful server-side interaction that will be added in a
-     * future release.
-     */
+    // Stub for the labeling run phase.
+    // Automatic item-frame placement still needs safer server interaction.
     public static void run(List<StorageLane> lanes) {
         ChatHelper.labelled("Lanes",
                 "§c/stash lanes label run is not yet implemented. "

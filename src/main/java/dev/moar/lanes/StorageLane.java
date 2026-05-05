@@ -12,45 +12,43 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 
-/**
- * Represents one logical storage lane: an ordered sequence of chests
- * (and optional hopper/input positions) assigned to a single item type.
- */
+// Represents one logical storage lane: an ordered sequence of chests
+// (and optional hopper/input positions) assigned to a single item type.
 public final class StorageLane {
 
     public enum DepositMode {
-        /** Walk to the first non-full chest in lane order and deposit directly. */
+        // Walk to the first non-full chest in lane order and deposit directly.
         DIRECT_FILL,
-        /** Deposit only into the designated input positions (hoppers / input chests). */
+        // Deposit only into the designated input positions (hoppers / input chests).
         INPUT_ONLY,
-        /** Try input positions first; fall back to DIRECT_FILL if they are absent or full. */
+        // Try input positions first; fall back to DIRECT_FILL if they are absent or full.
         HYBRID
     }
 
     public enum OverflowBehavior {
-        /** Leave overflowing items in player inventory unchanged. */
+        // Leave overflowing items in player inventory unchanged.
         SKIP,
-        /** Deposit overflow into the next lane that accepts the same item. */
+        // Deposit overflow into the next lane that accepts the same item.
         NEXT_LANE,
-        /** Send overflow to the configured dump chest. */
+        // Send overflow to the configured dump chest.
         DUMP
     }
 
     // ── Persisted fields ─────────────────────────────────────────────────────
 
-    /** Database-assigned id; 0 = not yet persisted. */
+    // Database-assigned id; 0 = not yet persisted.
     private int id;
-    /** Human-readable display name (e.g. "lane_1"). */
+    // Human-readable display name (e.g. "lane_1").
     private String name;
-    /** Assigned item identifier (e.g. "minecraft:cobblestone"). Nullable until set. */
+    // Assigned item identifier (e.g. "minecraft:cobblestone"). Nullable until set.
     private String itemId;
-    /** Position of the item frame that labels this lane. Nullable. */
+    // Position of the item frame that labels this lane. Nullable.
     private BlockPos labelFramePos;
-    /** Preferred outward-facing side for labels / lane interaction hints. Nullable. */
+    // Preferred outward-facing side for labels / lane interaction hints. Nullable.
     private Direction frontFace;
-    /** Ordered list of chest/barrel positions belonging to this lane. */
+    // Ordered list of chest/barrel positions belonging to this lane.
     private final List<BlockPos> chestPositions = new ArrayList<>();
-    /** Optional hopper or input-chest positions for filter-based systems. */
+    // Optional hopper or input-chest positions for filter-based systems.
     private final List<BlockPos> inputPositions = new ArrayList<>();
 
     private DepositMode depositMode = DepositMode.DIRECT_FILL;
@@ -109,13 +107,11 @@ public final class StorageLane {
 
     // ── Helpers ───────────────────────────────────────────────────────────────
 
-    /** True when this lane has been assigned an item type. */
+    // True when this lane has been assigned an item type.
     public boolean isAssigned() { return itemId != null && !itemId.isEmpty(); }
 
-    /**
-     * Returns true when {@code pos} is one of this lane's chest positions
-     * (or the double-chest partner of one, which shares the same block position).
-     */
+    // Returns true when the given position is one of this lane's chest positions
+    // (or the double-chest partner of one, which shares the same block position).
     public boolean containsChest(BlockPos pos) {
         for (BlockPos p : chestPositions) {
             if (p.equals(pos)) return true;
@@ -130,7 +126,7 @@ public final class StorageLane {
         return false;
     }
 
-    /** One-line chat summary for /stash lanes list and preview. */
+    // One-line chat summary for /stash lanes list and preview.
     public String summary() {
         String displayItem = (itemId != null && !itemId.isEmpty())
                 ? (itemId.startsWith("minecraft:") ? itemId.substring(10) : itemId)

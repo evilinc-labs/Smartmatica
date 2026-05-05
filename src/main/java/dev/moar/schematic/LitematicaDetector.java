@@ -112,9 +112,7 @@ public final class LitematicaDetector {
         return results;
     }
 
-    /**
-     * Convenience: return the first detected enabled placement, or null.
-     */
+    // Return the first detected enabled placement, or null.
     public static DetectedPlacement detectFirst() {
         List<DetectedPlacement> all = detectPlacements();
         return all.isEmpty() ? null : all.get(0);
@@ -254,11 +252,9 @@ public final class LitematicaDetector {
 
     // Correlate anchors from SchematicWorld.
 
-    /**
-     * Detect anchor by reading blocks from Litematica's SchematicWorld.
-     * Scans near the player, correlates against the schematic to compute
-     * the anchor offset. Returns null if detection fails.
-     */
+    // Detect anchor by reading blocks from Litematica's SchematicWorld.
+    // Scans near the player, correlates against the schematic to compute
+    // the anchor offset. Returns null if detection fails.
     public static BlockPos detectAnchorFromSchematicWorld(LitematicaSchematic schematic) {
         if (schematic == null) return null;
 

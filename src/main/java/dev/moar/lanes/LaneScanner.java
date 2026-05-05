@@ -27,28 +27,17 @@ import org.slf4j.LoggerFactory;
 
 import java.util.*;
 
-/**
- * Synchronous client-side scanner: reads block states and entities from the
- * already-loaded world to detect storage lanes without requiring the player
- * to walk anywhere.
- *
- * <p>Call {@link #scan(Object, BlockPos, BlockPos)} on the game thread with
- * the client world and region bounds.
- */
+// Synchronous client-side scanner for already-loaded chunks.
+// Reads block states and entities to detect storage lanes without moving the player.
+// Call scan on the game thread with the client world and region bounds.
 public final class LaneScanner {
 
     private static final Logger LOGGER = LoggerFactory.getLogger("MOAR/LaneScanner");
 
     private LaneScanner() {}
 
-    /**
-     * Scan the given world region and return candidate {@link StorageLane} objects.
-     *
-     * @param world   the client world ({@code World} or {@code Level} depending on version)
-     * @param min     inclusive minimum corner
-     * @param max     inclusive maximum corner
-     * @return ordered list of inferred lanes, sorted by priority (position in world)
-     */
+    // Scan the given world region and return candidate storage lanes.
+    // Results are ordered by world position.
     public static List<StorageLane> scan(
             /*? if >=26.1 {*//*
             Level world,
@@ -175,14 +164,9 @@ public final class LaneScanner {
 
     // ── Lane grouping ────────────────────────────────────────────────────────
 
-    /**
-     * Group chest positions into connected components using axis-constrained
-     * flood-fill.
-     *
-     * <p>Two chests are lane-adjacent when they lie along the same X or Z axis
-     * within 2 blocks (accommodating double-chest gaps), or form a staircase
-     * step (Δy = 1, Δx or Δz = 1).
-     */
+    // Group chest positions into connected components using axis-constrained
+    // flood-fill. Two chests count as lane-adjacent when they line up on X or Z
+    // within two blocks, or form a one-block staircase step.
     private static List<List<BlockPos>> groupIntoLanes(Set<BlockPos> all) {
         Set<BlockPos> remaining = new LinkedHashSet<>(all);
         List<List<BlockPos>> groups = new ArrayList<>();
@@ -223,20 +207,14 @@ public final class LaneScanner {
         return groups;
     }
 
-    /**
-     * Two chest positions are considered lane-adjacent if they could plausibly
-     * be consecutive chests in the same row or staircase.
-     *
-     * <p>Rules (all conditions must hold):
-     * <ul>
-     *   <li>X-row: same Y and Z, |ΔX| ≤ 2</li>
-     *   <li>Z-row: same X and Y, |ΔZ| ≤ 2</li>
-     *   <li>X-staircase: same Z, |ΔY| = 1, |ΔX| ≤ 2</li>
-     *   <li>Z-staircase: same X, |ΔY| = 1, |ΔZ| ≤ 2</li>
-     * </ul>
-     * Diagonal adjacency (ΔX > 0 AND ΔZ > 0) is intentionally excluded to
-     * prevent merging parallel lanes.
-     */
+    // Two chest positions are lane-adjacent when they could plausibly be
+    // consecutive chests in the same row or staircase.
+    // Allowed patterns:
+    // X-row: same Y and Z, |delta X| <= 2
+    // Z-row: same X and Y, |delta Z| <= 2
+    // X-staircase: same Z, |delta Y| = 1, |delta X| <= 2
+    // Z-staircase: same X, |delta Y| = 1, |delta Z| <= 2
+    // Diagonals are excluded so parallel lanes do not merge.
     private static boolean laneAdjacent(BlockPos a, BlockPos b) {
         int dx = Math.abs(b.getX() - a.getX());
         int dy = Math.abs(b.getY() - a.getY());
@@ -255,7 +233,7 @@ public final class LaneScanner {
         return false;
     }
 
-    /** Sort a lane component along its dominant axis (the one with highest variance). */
+    // Sort a lane component along its dominant axis (the one with highest variance).
     private static void sortComponent(List<BlockPos> component) {
         if (component.size() <= 1) return;
 
@@ -293,11 +271,8 @@ public final class LaneScanner {
 
     // ── Item frame association ───────────────────────────────────────────────
 
-    /**
-     * Find the best item frame for this lane and read its assigned item.
-     * A frame is a candidate if its block position is within 1 block of any
-     * chest in the lane.
-     */
+    // Find the best item frame for this lane and read its assigned item.
+    // A frame qualifies if it sits within one block of any chest in the lane.
     private static void associateItemFrame(
             StorageLane lane,
             /*? if >=26.1 {*//*
@@ -368,11 +343,8 @@ public final class LaneScanner {
 
     // ── Geometry helpers ─────────────────────────────────────────────────────
 
-    /**
-     * True when {@code probe} is within 1 block (Chebyshev distance) of
-     * {@code target} on at least one axis while the others are zero or one.
-     * This matches the 6 direct faces plus the 12 edge positions.
-     */
+    // True when probe is within one block of target in Chebyshev distance.
+    // This matches the 6 direct faces plus the 12 edge positions.
     private static boolean blockAdjacent(BlockPos probe, BlockPos target) {
         int dx = Math.abs(probe.getX() - target.getX());
         int dy = Math.abs(probe.getY() - target.getY());
@@ -380,7 +352,7 @@ public final class LaneScanner {
         return dx <= 1 && dy <= 1 && dz <= 1 && (dx + dy + dz) >= 1;
     }
 
-    /** True when {@code probe} is within 1 block of any position in {@code group}. */
+    // True when probe is within one block of any position in the group.
     private static boolean isAdjacentToAny(BlockPos probe, List<BlockPos> group) {
         for (BlockPos p : group) {
             if (blockAdjacent(probe, p)) return true;
