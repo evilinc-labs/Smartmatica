@@ -115,15 +115,17 @@ jobs:
         id: artifacts
         run: |
           VER="${{ steps.version.outputs.version }}"
-          jar_path="build/libs/${VER}/*.jar"
+          jar_dir="build/libs/${VER}"
+          jar_path="${jar_dir}/*.jar"
           sbom_path="build/release/moar-${VER}.spdx.json"
+          echo "jar_dir=${jar_dir}" >> "$GITHUB_OUTPUT"
           echo "jar_path=${jar_path}" >> "$GITHUB_OUTPUT"
           echo "sbom_path=${sbom_path}" >> "$GITHUB_OUTPUT"
 
       - name: Generate SBOM
         uses: anchore/sbom-action@v0
         with:
-          file: ${{ steps.artifacts.outputs.jar_path }}
+          file: ${{ steps.artifacts.outputs.jar_dir }}
           format: spdx-json
           output-file: ${{ steps.artifacts.outputs.sbom_path }}
           upload-artifact: false
