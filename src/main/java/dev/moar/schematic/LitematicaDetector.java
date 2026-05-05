@@ -36,28 +36,61 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
 
-// Detects Litematica schematic placements via reflection or JSON configs.
+// Read Litematica placements via reflection or JSON fallback.
 public final class LitematicaDetector {
 
     private static final Logger LOGGER = LoggerFactory.getLogger("MOAR/Detector");
 
     private LitematicaDetector() {}
 
-    // A detected Litematica schematic placement.
+    // One active Litematica placement.
     public record DetectedPlacement(
             Path schematicPath,
             String name,
-            int originX, int originY, int originZ
-    ) {}
+            int originX, int originY, int originZ,
+            String rotation,
+            String mirror,
+            int modifiedSubRegionCount
+    ) {
+        public boolean hasTopLevelTransform() {
+            return !isIdentityTransform(rotation) || !isIdentityTransform(mirror);
+        }
 
-    // Return all enabled placements (reflection first, JSON fallback).
+        public boolean hasModifiedSubRegions() {
+            return modifiedSubRegionCount > 0;
+        }
+
+        public boolean hasUnsupportedTransform() {
+            return hasTopLevelTransform() || hasModifiedSubRegions();
+        }
+
+        public String unsupportedTransformSummary() {
+            List<String> parts = new ArrayList<>();
+            if (!isIdentityTransform(rotation)) {
+                parts.add("rotation=" + rotation);
+            }
+            if (!isIdentityTransform(mirror)) {
+                parts.add("mirror=" + mirror);
+            }
+            if (modifiedSubRegionCount > 0) {
+                parts.add(modifiedSubRegionCount + " modified sub-region"
+                        + (modifiedSubRegionCount == 1 ? "" : "s"));
+            }
+            return parts.isEmpty() ? "identity placement" : String.join(", ", parts);
+        }
+
+        private static boolean isIdentityTransform(String value) {
+            return value == null || "NONE".equals(value);
+        }
+    }
+
+    // Return enabled placements. Prefer reflection, then JSON.
     public static List<DetectedPlacement> detectPlacements() {
-        // Primary: read live placements from Litematica's memory.
-        // This works even before Litematica saves its config to disk.
+        // Prefer live placements before config JSON.
         List<DetectedPlacement> live = detectFromMemory();
         if (!live.isEmpty()) return live;
 
-        // Fallback: parse on-disk JSON config files.
+        // Fall back to config JSON.
         List<DetectedPlacement> results = new ArrayList<>();
 
         Path configDir = FabricLoader.getInstance().getGameDir()
@@ -87,9 +120,9 @@ public final class LitematicaDetector {
         return all.isEmpty() ? null : all.get(0);
     }
 
-    // internals
+    // Internals.
 
-    // Read placements from Litematica memory via reflection.
+    // Read live placements via reflection.
     private static List<DetectedPlacement> detectFromMemory() {
         List<DetectedPlacement> results = new ArrayList<>();
         try {
@@ -112,22 +145,20 @@ public final class LitematicaDetector {
                 }
                 if (!enabled) continue;
 
-                // getOrigin() → BlockPos
+                // Read the placement origin.
                 Object origin = pClass.getMethod("getOrigin").invoke(p);
                 int ox = (int) origin.getClass().getMethod("getX").invoke(origin);
                 int oy = (int) origin.getClass().getMethod("getY").invoke(origin);
                 int oz = (int) origin.getClass().getMethod("getZ").invoke(origin);
 
-                // getSchematicFile() → File
+                // Read the backing .litematic path.
                 java.io.File schematicFile = (java.io.File) pClass
                         .getMethod("getSchematicFile").invoke(p);
                 if (schematicFile == null) continue;
                 Path schematicPath = schematicFile.toPath().normalize();
                 if (!schematicPath.toString().endsWith(".litematic")) continue;
 
-                // Don't skip placements whose file is missing on disk —
-                // we still need the origin for anchor alignment.  The
-                // file may have been loaded from memory or a temp path.
+                // Keep the origin even if the file is gone.
                 if (!Files.exists(schematicPath)) {
                     LOGGER.warn("Litematica placement '{}' file not on disk: {} — including for origin only",
                             schematicPath.getFileName(), schematicPath);
@@ -140,12 +171,17 @@ public final class LitematicaDetector {
                     name = schematicPath.getFileName().toString();
                 }
 
-                results.add(new DetectedPlacement(schematicPath, name, ox, oy, oz));
-                LOGGER.info("Live-detected Litematica placement: '{}' at ({}, {}, {}) file={}",
-                        name, ox, oy, oz, schematicPath);
+                String rotation = getEnumName(pClass, p, "getRotation", "NONE");
+                String mirror = getEnumName(pClass, p, "getMirror", "NONE");
+                int modifiedSubRegions = countModifiedSubRegions(pClass, p);
+
+                results.add(new DetectedPlacement(
+                        schematicPath, name, ox, oy, oz, rotation, mirror, modifiedSubRegions));
+                LOGGER.info("Live-detected Litematica placement: '{}' at ({}, {}, {}) file={} rotation={} mirror={} modifiedSubRegions={}",
+                        name, ox, oy, oz, schematicPath, rotation, mirror, modifiedSubRegions);
             }
         } catch (ClassNotFoundException e) {
-            // Litematica not present — normal for some setups
+            // Litematica is optional.
             LOGGER.debug("Litematica classes not found — reflection detection unavailable");
         } catch (Exception e) {
             LOGGER.debug("Litematica reflection detection failed: {}", e.getMessage());
@@ -175,7 +211,7 @@ public final class LitematicaDetector {
                 String schematicStr = entry.get("schematic").getAsString();
                 Path schematicPath = Path.of(schematicStr).normalize();
 
-                // Validate file extension to prevent loading non-schematic files
+                // Ignore non-schematic files.
                 if (!schematicPath.toString().endsWith(".litematic")) {
                     LOGGER.warn("Skipping placement — not a .litematic file: {}", schematicStr);
                     continue;
@@ -196,9 +232,18 @@ public final class LitematicaDetector {
                 int oy = origin.get(1).getAsInt();
                 int oz = origin.get(2).getAsInt();
 
-                results.add(new DetectedPlacement(schematicPath, name, ox, oy, oz));
-                LOGGER.debug("Detected Litematica placement: '{}' at ({}, {}, {}) from {}",
-                        name, ox, oy, oz, schematicPath.getFileName());
+                String rotation = entry.has("rotation")
+                        ? entry.get("rotation").getAsString()
+                        : "NONE";
+                String mirror = entry.has("mirror")
+                        ? entry.get("mirror").getAsString()
+                        : "NONE";
+                int modifiedSubRegions = countModifiedSubRegions(entry);
+
+                results.add(new DetectedPlacement(
+                        schematicPath, name, ox, oy, oz, rotation, mirror, modifiedSubRegions));
+                LOGGER.debug("Detected Litematica placement: '{}' at ({}, {}, {}) from {} rotation={} mirror={} modifiedSubRegions={}",
+                        name, ox, oy, oz, schematicPath.getFileName(), rotation, mirror, modifiedSubRegions);
             }
         } catch (Exception e) {
             LOGGER.warn("Failed to parse Litematica placement file: {}", jsonFile.getFileName(), e);
@@ -207,7 +252,7 @@ public final class LitematicaDetector {
         return results;
     }
 
-    // SchematicWorld anchor correlation
+    // Correlate anchors from SchematicWorld.
 
     /**
      * Detect anchor by reading blocks from Litematica's SchematicWorld.
@@ -224,9 +269,7 @@ public final class LitematicaDetector {
         /*?}*/
         if (mc.player == null) return null;
 
-        // Access Litematica's SchematicWorld via reflection:
-        // SchematicWorldHandler.getSchematicWorld() → WorldSchematic
-        // WorldSchematic extends World, so getBlockState(BlockPos) works.
+        // Read SchematicWorld via reflection.
         /*? if >=26.1 {*//*
         Level schematicWorld;
         *//*?} else {*/
@@ -271,9 +314,7 @@ public final class LitematicaDetector {
         /*?}*/
         int scanRadius = 64;
 
-        // Phase 1: find non-air blocks in the SchematicWorld near the player.
-        // Collect up to a handful — we only need one to compute the anchor,
-        // but we'll verify with several.
+        // Sample nearby hologram blocks.
         List<BlockPos> hologramBlocks = new ArrayList<>();
         List<BlockState> hologramStates = new ArrayList<>();
 
@@ -301,9 +342,7 @@ public final class LitematicaDetector {
 
         LOGGER.info("Found {} hologram blocks near player — correlating with schematic", hologramBlocks.size());
 
-        // Phase 2: for the first hologram block, search the schematic for
-        // all positions with a matching block state.  Each match gives a
-        // candidate anchor.
+        // Build anchor candidates from the first match.
         BlockPos firstWorld = hologramBlocks.get(0);
         BlockState firstState = hologramStates.get(0);
 
@@ -314,11 +353,11 @@ public final class LitematicaDetector {
                     for (int x = 0; x < region.absX; x++) {
                         BlockState rs = region.getBlockState(x, y, z);
                         if (rs.equals(firstState)) {
-                            // schematic-local pos = region.origin + (x, y, z)
+                            // Map back to schematic-local space.
                             int sx = region.originX + x;
                             int sy = region.originY + y;
                             int sz = region.originZ + z;
-                            // anchor candidate: worldPos - schematicPos
+                            // Convert to an anchor candidate.
                             candidates.add(new BlockPos(
                                     firstWorld.getX() - sx,
                                     firstWorld.getY() - sy,
@@ -335,8 +374,7 @@ public final class LitematicaDetector {
             return null;
         }
 
-        // Phase 3: verify each candidate by checking more hologram blocks.
-        // The correct anchor will match ALL hologram blocks.
+        // Keep the best-matching candidate.
         BlockPos bestAnchor = null;
         int bestScore = 0;
 
@@ -364,5 +402,95 @@ public final class LitematicaDetector {
                     bestAnchor, bestScore, hologramBlocks.size());
         }
         return bestAnchor;
+    }
+
+    private static String getEnumName(Class<?> targetClass, Object target,
+                                      String methodName, String fallback) {
+        try {
+            Object value = targetClass.getMethod(methodName).invoke(target);
+            if (value instanceof Enum<?> enumValue) {
+                return enumValue.name();
+            }
+            return value != null ? value.toString() : fallback;
+        } catch (NoSuchMethodException e) {
+            return fallback;
+        } catch (Exception e) {
+            LOGGER.debug("Failed reading Litematica placement {}: {}", methodName, e.getMessage());
+            return fallback;
+        }
+    }
+
+    private static int countModifiedSubRegions(Class<?> placementClass, Object placement) {
+        try {
+            Object raw = placementClass.getMethod("getAllSubRegionsPlacements").invoke(placement);
+            if (!(raw instanceof Iterable<?> subRegions)) return 0;
+
+            int modified = 0;
+            for (Object subRegion : subRegions) {
+                if (subRegion != null && isModifiedSubRegion(subRegion)) {
+                    modified++;
+                }
+            }
+            return modified;
+        } catch (NoSuchMethodException e) {
+            return 0;
+        } catch (Exception e) {
+            LOGGER.debug("Failed reading Litematica sub-region placement metadata: {}", e.getMessage());
+            return 0;
+        }
+    }
+
+    private static boolean isModifiedSubRegion(Object subRegion) {
+        Class<?> subRegionClass = subRegion.getClass();
+        try {
+            return (boolean) subRegionClass.getMethod("isRegionPlacementModifiedFromDefault")
+                    .invoke(subRegion);
+        } catch (NoSuchMethodException ignored) {
+            // Fall back to field checks.
+        } catch (Exception e) {
+            LOGGER.debug("Failed checking sub-region modification flag: {}", e.getMessage());
+        }
+
+        String rotation = getEnumName(subRegionClass, subRegion, "getRotation", "NONE");
+        String mirror = getEnumName(subRegionClass, subRegion, "getMirror", "NONE");
+        if (!"NONE".equals(rotation) || !"NONE".equals(mirror)) {
+            return true;
+        }
+
+        try {
+            Object pos = subRegionClass.getMethod("getPos").invoke(subRegion);
+            Object defaultPos = subRegionClass.getMethod("getDefaultPos").invoke(subRegion);
+            return pos != null && !pos.equals(defaultPos);
+        } catch (NoSuchMethodException e) {
+            return false;
+        } catch (Exception e) {
+            LOGGER.debug("Failed comparing sub-region positions: {}", e.getMessage());
+            return false;
+        }
+    }
+
+    private static int countModifiedSubRegions(JsonObject entry) {
+        if (!entry.has("placements")) return 0;
+
+        JsonArray placements = entry.getAsJsonArray("placements");
+        int modified = 0;
+        for (JsonElement elem : placements) {
+            if (!elem.isJsonObject()) continue;
+            JsonObject placementEntry = elem.getAsJsonObject();
+            if (!placementEntry.has("placement") || !placementEntry.get("placement").isJsonObject()) continue;
+
+            JsonObject subPlacement = placementEntry.getAsJsonObject("placement");
+            String rotation = subPlacement.has("rotation")
+                    ? subPlacement.get("rotation").getAsString()
+                    : "NONE";
+            String mirror = subPlacement.has("mirror")
+                    ? subPlacement.get("mirror").getAsString()
+                    : "NONE";
+
+            if (!"NONE".equals(rotation) || !"NONE".equals(mirror)) {
+                modified++;
+            }
+        }
+        return modified;
     }
 }

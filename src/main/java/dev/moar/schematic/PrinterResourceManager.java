@@ -100,6 +100,7 @@ public final class PrinterResourceManager {
         MoarMod.getChestManager().loadKeepItems();
         PrinterDatabase.loadScaffold();
         MoarMod.getStashManager().loadFromDatabase();
+        MoarMod.getLaneManager().loadFromDatabase();
         MoarMod.getSpawnProofer().loadConfig();
     }
 

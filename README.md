@@ -4,7 +4,7 @@
 
 A client-side Fabric mod that automates schematic building, spawn-proofing, and container management. Load a `.litematic`, point it at some supply chests, and let it build, restock, recover from disconnects, and keep working across long multi-container runs.
 
-## 2.0 Highlights
+## 2.1 Highlights
 
 - **Smarter printer detection** : auto-detects active Litematica placements and can fall back to hologram block correlation when the live placement list is unavailable
 - **Resume-first building** : printer checkpoints survive disconnects and `/printer resume` restores the build state from disk
@@ -47,7 +47,7 @@ Define a region and let it place light sources on every dark spawnable surface.
 Scan, index, and organize containers across large areas.
 
 - **Container indexing** : scans chests, barrels, shulker boxes, and hoppers in a defined region
-- **Auto-organizing** : sorts items into columns, packs shulkers, handles overflow
+- **Experimental auto-organizing** : sorts items into columns, packs shulkers, handles overflow
 - **Item retrieval** : `/stash get <item> [count]` walks the stash and pulls exact items back to the player
 - **Kit system** : save, snapshot, edit, list, and load named loadouts with `/stash kit ...`
 - **Region profiles** : save/load/delete named scan regions with `/stash region ...`
@@ -142,7 +142,7 @@ All versions require [Fabric Loader](https://fabricmc.net/use/) ≥ 0.18.4.
 | `/stash pos1 [x y z]` | Set corner 1 (default: player position) |
 | `/stash pos2 [x y z]` | Set corner 2 |
 | `/stash scan` | Scan all containers in the region |
-| `/stash organize` | Auto-organize: column sort, shulker pack, overflow |
+| `/stash organize` | Experimental auto-organize: column sort, shulker pack, overflow |
 | `/stash organize stop` | Stop organizing |
 | `/stash search <item>` | Find scanned containers holding an item |
 | `/stash get <item> [count]` | Retrieve an item directly from the indexed stash |
@@ -207,10 +207,10 @@ Requires **JDK 21+**.
 ```bash
 ./gradlew build                  # Build all versions
 ./gradlew :1.21.8:build          # Build one version
-./gradlew buildAndCollect        # Collect all JARs → build/libs/2.0.0/
+./gradlew buildAndCollect        # Collect all JARs → build/libs/2.1.0/
 ```
 
-Output: `versions/<mc>/build/libs/moar-2.0.0+<mc>.jar`
+Output: `versions/<mc>/build/libs/moar-2.1.0+<mc>.jar`
 
 ### Build Stack
 

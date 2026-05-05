@@ -7,6 +7,7 @@ import dev.moar.chest.ChestManager;
 import dev.moar.command.PrinterCommand;
 import dev.moar.command.SpawnProofCommand;
 import dev.moar.command.StashCommand;
+import dev.moar.lanes.LaneManager;
 import dev.moar.stash.StashDatabase;
 import dev.moar.stash.StashManager;
 import dev.moar.printer.SchematicPrinter;
@@ -55,6 +56,7 @@ public class MoarMod implements ClientModInitializer {
     private static final SpawnProofer SPAWN_PROOFER = new SpawnProofer();
     private static final ChestManager CHEST_MANAGER = new ChestManager();
     private static final StashManager STASH_MANAGER = new StashManager();
+    private static final LaneManager LANE_MANAGER = new LaneManager();
     private static MoarProperties PROPERTIES;
     private static ApiServer API_SERVER;
 
@@ -129,6 +131,9 @@ public class MoarMod implements ClientModInitializer {
 
             // Tick the stash manager
             STASH_MANAGER.tick();
+
+            // Tick the lane manager (sorting state machine)
+            LANE_MANAGER.tick();
         });
 
         // Restart API server when joining a server/world
@@ -142,6 +147,7 @@ public class MoarMod implements ClientModInitializer {
             STASH_MANAGER.stop();
             STASH_MANAGER.getOrganizer().stop();
             STASH_MANAGER.getRetriever().stop();
+            LANE_MANAGER.stop();
             SPAWN_PROOFER.stop();
             PathWalker.stop();
             SetbackMonitor.get().reset();
@@ -171,6 +177,11 @@ public class MoarMod implements ClientModInitializer {
     /** Get the singleton stash manager instance. */
     public static StashManager getStashManager() {
         return STASH_MANAGER;
+    }
+
+    /** Get the singleton lane manager instance. */
+    public static LaneManager getLaneManager() {
+        return LANE_MANAGER;
     }
 
     /** Get the shared SQLite database. */

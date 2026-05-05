@@ -12,6 +12,7 @@ import dev.moar.util.PlacementEngine;
 import dev.moar.util.PrinterDatabase;
 import dev.moar.MoarMod;
 import dev.moar.util.SneakOverride;
+import dev.moar.world.SetbackMonitor;
 /*? if >=26.1 {*//*
 import net.minecraft.world.level.block.*;
 import net.minecraft.world.level.block.state.*;
@@ -274,6 +275,9 @@ public class SchematicPrinter {
     private int walkAttemptCooldown;
     private int stuckCycles;
     private static final int MAX_STUCK_CYCLES = 10;
+    private int walkingSetbackPauseTicks;
+    private int observedWalkingSetbacks;
+    private static final int WALK_SETBACK_PAUSE_TICKS = 16;
     /** Ticks until next skippedItems re-evaluation. */
     private int skippedItemRecheckCooldown;
     private static final int SKIPPED_RECHECK_INTERVAL = 200; // ~10s
@@ -469,6 +473,8 @@ public class SchematicPrinter {
         lastWalkTargetZone = null;
         walkAttemptCooldown = 0;
         stuckCycles = 0;
+        walkingSetbackPauseTicks = 0;
+        observedWalkingSetbacks = SetbackMonitor.get().totalSetbacks();
         restockFailures = 0;
         unreachableChests.clear();
         skippedItems.clear();
@@ -551,6 +557,8 @@ public class SchematicPrinter {
         PlacementEngine.reset();
         PathWalker.stop();
         autoState = AutoState.IDLE;
+        walkingSetbackPauseTicks = 0;
+        observedWalkingSetbacks = SetbackMonitor.get().totalSetbacks();
         SneakOverride.setForceSneak(false); // always release mixin sneak
         SneakOverride.setForceAbsoluteSneak(false);
 
@@ -577,6 +585,7 @@ public class SchematicPrinter {
         if (placements.isEmpty()) return false;
 
         int sameFilePlacementCount = 0;
+        int unsupportedPlacements = 0;
 
         /*? if >=26.1 {*//*
         Minecraft mc = Minecraft.getInstance();
@@ -589,18 +598,22 @@ public class SchematicPrinter {
         BlockPos playerPos = mc.player != null ? mc.player.getBlockPos() : BlockPos.ORIGIN;
         /*?}*/
 
-        // Pick the closest placement to the player, but skip any with
-        // origin (0,0,0) that is far from the player — that's almost
-        // always an un-moved default Litematica placement.
+        // Prefer the nearest identity placement.
         LitematicaDetector.DetectedPlacement best = null;
         double bestDist = Double.MAX_VALUE;
         for (LitematicaDetector.DetectedPlacement p : placements) {
+            if (p.hasUnsupportedTransform()) {
+                unsupportedPlacements++;
+                LOGGER.warn("Skipping placement '{}' — unsupported transform: {}",
+                        p.name(), p.unsupportedTransformSummary());
+                continue;
+            }
             boolean originIsZero = p.originX() == 0 && p.originY() == 0 && p.originZ() == 0;
             double dx = p.originX() - playerPos.getX();
             double dz = p.originZ() - playerPos.getZ();
             double dist = Math.sqrt(dx * dx + dz * dz);
 
-            // Skip default-origin placements if the player is far from spawn
+            // Ignore default-origin placements far from spawn.
             if (originIsZero && dist > 100) {
                 LOGGER.warn("Skipping placement '{}' — origin is (0,0,0) and player is {} blocks away",
                         p.name(), (int) dist);
@@ -613,8 +626,15 @@ public class SchematicPrinter {
         }
 
         if (best == null) {
-            // All placements were skipped (origin-zero, far from player)
-            if (!placements.isEmpty()) {
+            // Everything got filtered out.
+            if (unsupportedPlacements > 0) {
+                ChatHelper.info("§e⚠ Found §f" + unsupportedPlacements
+                        + "§e Litematica placement(s) using rotation, mirroring,"
+                        + " or non-default sub-region placement.");
+                ChatHelper.info("§7MOAR can only auto-detect identity placements right now."
+                        + " Reset the placement in Litematica, or load manually and use"
+                        + " §f/printer here§7.");
+            } else if (!placements.isEmpty()) {
                 ChatHelper.info("§e⚠ Found §f" + placements.size()
                         + "§e Litematica placement(s), but all appear to be at world origin."
                         + "\n§7Move your placement in Litematica to the build site,"
@@ -625,14 +645,13 @@ public class SchematicPrinter {
 
         LitematicaDetector.DetectedPlacement placement = best;
         for (LitematicaDetector.DetectedPlacement p : placements) {
-            if (p.schematicPath().getFileName().equals(placement.schematicPath().getFileName())) {
+            if (!p.hasUnsupportedTransform()
+                    && p.schematicPath().getFileName().equals(placement.schematicPath().getFileName())) {
                 sameFilePlacementCount++;
             }
         }
 
-        // If the schematic file doesn't exist on disk, we can't load it
-        // — but we can still use the origin to set the anchor, provided
-        // a schematic was already loaded via /printer load.
+        // Reuse the loaded schematic if only the origin remains.
         if (!Files.exists(placement.schematicPath())) {
             if (schematic != null) {
                 this.anchor = new BlockPos(
@@ -650,19 +669,13 @@ public class SchematicPrinter {
 
         try {
             this.schematic = LitematicaSchematic.load(placement.schematicPath());
-            // Litematica's placement origin refers to the schematic's original
-            // reference point (0,0,0).  After load() normalizes region origins
-            // the min corner sits at (0,0,0), so we must shift the anchor by
-            // the normalization offset so that (worldPos - anchor) yields the
-            // normalized coordinates that getBlockState() expects.
+            // Shift the anchor by the normalization offset.
             this.anchor = new BlockPos(
                     placement.originX() + schematic.getOriginOffsetX(),
                     placement.originY() + schematic.getOriginOffsetY(),
                     placement.originZ() + schematic.getOriginOffsetZ());
 
-            // Multiple enabled placements can point to the same .litematic.
-            // In that case, "closest to player" is often the old build site.
-            // Use SchematicWorld correlation immediately to disambiguate.
+            // Use hologram correlation to break same-file ties.
             if (sameFilePlacementCount > 1) {
                 BlockPos correlated = LitematicaDetector.detectAnchorFromSchematicWorld(schematic);
                 if (correlated != null) {
@@ -701,14 +714,16 @@ public class SchematicPrinter {
         List<LitematicaDetector.DetectedPlacement> placements =
                 LitematicaDetector.detectPlacements();
 
-        // Collect all filename-matching placements.
-        // If there are multiple, this is ambiguous (common when users keep
-        // old and new stacks of the same schematic enabled at once), so let
-        // SchematicWorld correlation resolve it instead of guessing by distance.
+        // Collect matching placements and reject transformed ones.
         List<LitematicaDetector.DetectedPlacement> fileMatches = new ArrayList<>();
         for (LitematicaDetector.DetectedPlacement p : placements) {
             String placementFile = p.schematicPath().getFileName().toString();
             if (!placementFile.equals(schematicFile)) continue;
+            if (p.hasUnsupportedTransform()) {
+                LOGGER.warn("Ignoring placement '{}' during anchor sync — unsupported transform: {}",
+                        p.name(), p.unsupportedTransformSummary());
+                continue;
+            }
             fileMatches.add(p);
         }
 
@@ -723,8 +738,7 @@ public class SchematicPrinter {
 
         if (bestMatch == null) return false;
 
-        // Don't sync to a (0,0,0) origin if the player is far from it —
-        // that's almost certainly an un-moved default placement.
+        // Ignore default-origin placements far from spawn.
         if (bestMatch.originX() == 0 && bestMatch.originY() == 0 && bestMatch.originZ() == 0) {
             if (mc.player != null) {
                 double dx = bestMatch.originX() - mc.player.getX();
@@ -763,6 +777,26 @@ public class SchematicPrinter {
             }
         }
         return false;
+    }
+
+    private boolean hasSupportedPlacementMatch() {
+        if (schematicFile == null) return false;
+
+        for (LitematicaDetector.DetectedPlacement p : LitematicaDetector.detectPlacements()) {
+            if (!p.schematicPath().getFileName().toString().equals(schematicFile)) continue;
+            if (!p.hasUnsupportedTransform()) return true;
+        }
+        return false;
+    }
+
+    private LitematicaDetector.DetectedPlacement findUnsupportedPlacementMatch() {
+        if (schematicFile == null) return null;
+
+        for (LitematicaDetector.DetectedPlacement p : LitematicaDetector.detectPlacements()) {
+            if (!p.schematicPath().getFileName().toString().equals(schematicFile)) continue;
+            if (p.hasUnsupportedTransform()) return p;
+        }
+        return null;
     }
 
     /**
@@ -913,6 +947,8 @@ public class SchematicPrinter {
             lastWalkTargetZone = null;
             walkAttemptCooldown = 0;
             stuckCycles = 0;
+            walkingSetbackPauseTicks = 0;
+            observedWalkingSetbacks = SetbackMonitor.get().totalSetbacks();
             if (this.autoBuild) {
                 autoState = clearingDone ? AutoState.BUILDING : AutoState.CLEARING_AREA;
             } else {
@@ -938,10 +974,12 @@ public class SchematicPrinter {
         if (mc.player == null || mc.world == null || mc.interactionManager == null) return;
         /*?}*/
 
-        // Verify Litematica placement is still active (auto-detected only).
+        // Stop if the auto-detected placement disappears or changes shape.
         if (autoDetected && schematicFile != null && ++placementCheckCooldown >= 100) {
             placementCheckCooldown = 0;
-            if (!isPlacementStillActive()) {
+            boolean active = isPlacementStillActive();
+            boolean supported = hasSupportedPlacementMatch();
+            if (!active) {
                 if (statusMessages) {
                     ChatHelper.info("§cLitematica placement unloaded — printer stopped.");
                 }
@@ -949,11 +987,21 @@ public class SchematicPrinter {
                 unload();
                 return;
             }
+            if (!supported) {
+                if (statusMessages) {
+                    LitematicaDetector.DetectedPlacement unsupported = findUnsupportedPlacementMatch();
+                    ChatHelper.info("§cLitematica placement changed to an unsupported transform — printer stopped.");
+                    if (unsupported != null) {
+                        ChatHelper.info("§7Current placement: §f" + unsupported.unsupportedTransformSummary());
+                    }
+                }
+                disable();
+                unload();
+                return;
+            }
         }
 
-        // In manual mode, use silent rotation to avoid camera jerk and
-        // conflicting rotation states that cause server rubberbanding.
-        // Forward BPS to the placement engine.
+        // Forward BPS and keep manual mode silent.
         PlacementEngine.setBps(bps);
         if (autoBuild) {
             PlacementEngine.setSilentRotation(false);
@@ -961,7 +1009,7 @@ public class SchematicPrinter {
             PlacementEngine.setSilentRotation(true);
         }
 
-        // Periodic maintenance (every ~200 ticks ≈ 10 s)
+        // Flush maintenance every ~10 s.
         /*? if >=26.1 {*//*
         if (mc.level.getGameTime() % 200 == 0) {
         *//*?} else {*/
@@ -971,15 +1019,13 @@ public class SchematicPrinter {
             PlacementEngine.pruneCompletedCorrections();
         }
 
-        // Periodic anchor re-sync.  Prefer authoritative Litematica
-        // placement data over the heuristic hologram correlation —
-        // the hologram scan can produce wrong anchors when many blocks
-        // share the same state (e.g. stone, dirt).
+        // Periodically resync the anchor.
         if (schematic != null && --anchorCorrelationCooldown <= 0) {
             anchorCorrelationCooldown = ANCHOR_CORRELATION_INTERVAL;
             BlockPos prevAnchor = this.anchor;
             boolean synced = trySyncAnchor();
-            if (!synced) {
+            boolean canUseHologramCorrelation = findUnsupportedPlacementMatch() == null;
+            if (!synced && canUseHologramCorrelation) {
                 BlockPos correlated = LitematicaDetector.detectAnchorFromSchematicWorld(schematic);
                 if (correlated != null) {
                     if (!correlated.equals(anchor)) {
@@ -991,10 +1037,12 @@ public class SchematicPrinter {
                     }
                     anchorCorrelated = true;
                 }
+            } else if (!synced) {
+                anchorCorrelated = false;
             } else {
                 anchorCorrelated = true;
             }
-            // If the anchor changed (by either method), reset walk state
+            // Reset walking if the anchor moved.
             if (anchor != null && !anchor.equals(prevAnchor)) {
                 PathWalker.stop();
                 if (autoBuild) {
@@ -1805,6 +1853,29 @@ public class SchematicPrinter {
     *//*?} else {*/
     private void tickWalking(MinecraftClient mc, AutoState arrivalState) {
     /*?}*/
+        SetbackMonitor setbackMonitor = SetbackMonitor.get();
+        int totalSetbacks = setbackMonitor.totalSetbacks();
+        if (totalSetbacks != observedWalkingSetbacks) {
+            observedWalkingSetbacks = totalSetbacks;
+            walkingSetbackPauseTicks = WALK_SETBACK_PAUSE_TICKS;
+            if (PathWalker.isActive()) {
+                PathWalker.stop();
+            }
+            PlacementEngine.reset();
+            noProgressTicks = 0;
+            walkAttemptCooldown = Math.max(walkAttemptCooldown, WALK_SETBACK_PAUSE_TICKS);
+            LOGGER.debug("Setback detected while walking — pausing before replanning");
+            return;
+        }
+
+        if (walkingSetbackPauseTicks > 0) {
+            walkingSetbackPauseTicks--;
+            return;
+        }
+        if (!setbackMonitor.isCalm()) {
+            return;
+        }
+
         if (!PathWalker.isActive()) {
             // multi-phase descent continuation
             // walkToZoneWithPlacement may have set up a descent for
@@ -1871,9 +1942,8 @@ public class SchematicPrinter {
             if (PathWalker.hasArrived()) {
                 walkFailCount = 0;
                 triedPlacementWalk = false;
-                // Keep lastWalkTargetZone so tryWalkToNextZone can detect
-                // if we're re-picking the same zone that produced no placement.
-                // It will be cleared when a block IS successfully placed.
+                walkingSetbackPauseTicks = 0;
+                // Keep the failed zone until a placement succeeds.
                 // Player moved to a new position — chests that were
                 // unreachable from the old position may be reachable
                 // from here (e.g. after climbing to the build zone,

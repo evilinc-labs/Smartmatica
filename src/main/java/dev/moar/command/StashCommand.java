@@ -4,6 +4,8 @@ import com.mojang.brigadier.arguments.IntegerArgumentType;
 import com.mojang.brigadier.arguments.StringArgumentType;
 import dev.moar.MoarMod;
 import dev.moar.chest.ChestManager;
+import dev.moar.lanes.LaneManager;
+import dev.moar.lanes.StorageLane;
 import dev.moar.stash.StashDatabase;
 import dev.moar.stash.StashDatabase.SearchResult;
 import dev.moar.stash.StashManager;
@@ -107,6 +109,45 @@ public final class StashCommand {
         for (String name : db.listRegions()) {
             if (name.toLowerCase(java.util.Locale.ROOT).startsWith(remaining)) {
                 builder.suggest(name);
+            }
+        }
+        return builder.buildFuture();
+    };
+
+    /** Suggests known lane names from accepted and pending lanes. */
+    private static final SuggestionProvider<FabricClientCommandSource> SUGGEST_LANES = (ctx, builder) -> {
+        String remaining = builder.getRemaining().toLowerCase(java.util.Locale.ROOT);
+        java.util.Set<String> names = new java.util.LinkedHashSet<>();
+        for (StorageLane lane : MoarMod.getLaneManager().getAcceptedLanes()) {
+            names.add(lane.getName());
+        }
+        for (StorageLane lane : MoarMod.getLaneManager().getPendingLanes()) {
+            names.add(lane.getName());
+        }
+        for (String name : names) {
+            if (name.toLowerCase(java.util.Locale.ROOT).startsWith(remaining)) {
+                builder.suggest(name);
+            }
+        }
+        return builder.buildFuture();
+    };
+
+    private static final SuggestionProvider<FabricClientCommandSource> SUGGEST_LANE_MODES = (ctx, builder) -> {
+        String remaining = builder.getRemaining().toLowerCase(java.util.Locale.ROOT);
+        for (StorageLane.DepositMode mode : StorageLane.DepositMode.values()) {
+            String value = mode.name().toLowerCase(java.util.Locale.ROOT);
+            if (value.startsWith(remaining)) {
+                builder.suggest(value);
+            }
+        }
+        return builder.buildFuture();
+    };
+
+    private static final SuggestionProvider<FabricClientCommandSource> SUGGEST_DIRECTIONS = (ctx, builder) -> {
+        String remaining = builder.getRemaining().toLowerCase(java.util.Locale.ROOT);
+        for (String direction : java.util.List.of("north", "south", "east", "west", "up", "down")) {
+            if (direction.startsWith(remaining)) {
+                builder.suggest(direction);
             }
         }
         return builder.buildFuture();
@@ -351,6 +392,9 @@ public final class StashCommand {
 
             // /stash region (save, load, list, delete)
             root.then(buildRegionSubcommand());
+
+            // /stash lanes (storage lane manager)
+            root.then(buildLanesSubcommand());
 
             // /stash search <item>
             /*? if >=26.1 {*//*
@@ -973,11 +1017,28 @@ public final class StashCommand {
         return 1;
     }
 
-    /** Find the container block the player is targeting (crosshair > feet > below). */
+    /** Find a chest/barrel/shulker near the crosshair (crosshair > feet > below). */
     /*? if >=26.1 {*//*
     private static BlockPos findTargetContainer(Minecraft mc) {
     *//*?} else {*/
     private static BlockPos findTargetContainer(MinecraftClient mc) {
+    /*?}*/
+        return findTargetStorageBlock(mc, false);
+    }
+
+    /** Find an input-capable block near the crosshair (includes hoppers). */
+    /*? if >=26.1 {*//*
+    private static BlockPos findTargetInput(Minecraft mc) {
+    *//*?} else {*/
+    private static BlockPos findTargetInput(MinecraftClient mc) {
+    /*?}*/
+        return findTargetStorageBlock(mc, true);
+    }
+
+    /*? if >=26.1 {*//*
+    private static BlockPos findTargetStorageBlock(Minecraft mc, boolean includeHoppers) {
+    *//*?} else {*/
+    private static BlockPos findTargetStorageBlock(MinecraftClient mc, boolean includeHoppers) {
     /*?}*/
         /*? if >=26.1 {*//*
         if (mc.player == null || mc.level == null) return null;
@@ -988,30 +1049,31 @@ public final class StashCommand {
         if (mc.hitResult instanceof BlockHitResult bhr
                 && mc.hitResult.getType() == HitResult.Type.BLOCK) {
             BlockPos lookPos = bhr.getBlockPos();
-            if (isContainer(mc.level.getBlockState(lookPos).getBlock())) return lookPos;
+            if (isStorageTarget(mc.level.getBlockState(lookPos).getBlock(), includeHoppers)) return lookPos;
         }
         BlockPos feet = mc.player.blockPosition();
-        if (isContainer(mc.level.getBlockState(feet).getBlock())) return feet;
+        if (isStorageTarget(mc.level.getBlockState(feet).getBlock(), includeHoppers)) return feet;
         BlockPos below = feet.below();
-        if (isContainer(mc.level.getBlockState(below).getBlock())) return below;
+        if (isStorageTarget(mc.level.getBlockState(below).getBlock(), includeHoppers)) return below;
         *//*?} else {*/
         if (mc.crosshairTarget instanceof BlockHitResult bhr
                 && mc.crosshairTarget.getType() == HitResult.Type.BLOCK) {
             BlockPos lookPos = bhr.getBlockPos();
-            if (isContainer(mc.world.getBlockState(lookPos).getBlock())) return lookPos;
+            if (isStorageTarget(mc.world.getBlockState(lookPos).getBlock(), includeHoppers)) return lookPos;
         }
         BlockPos feet = mc.player.getBlockPos();
-        if (isContainer(mc.world.getBlockState(feet).getBlock())) return feet;
+        if (isStorageTarget(mc.world.getBlockState(feet).getBlock(), includeHoppers)) return feet;
         BlockPos below = feet.down();
-        if (isContainer(mc.world.getBlockState(below).getBlock())) return below;
+        if (isStorageTarget(mc.world.getBlockState(below).getBlock(), includeHoppers)) return below;
         /*?}*/
         return null;
     }
 
-    private static boolean isContainer(Block block) {
+    private static boolean isStorageTarget(Block block, boolean includeHoppers) {
         return block instanceof ChestBlock
                 || block instanceof BarrelBlock
-                || block instanceof ShulkerBoxBlock;
+                || block instanceof ShulkerBoxBlock
+                || (includeHoppers && block instanceof HopperBlock);
     }
 
     private static StashManager getManager() {
@@ -1158,5 +1220,486 @@ public final class StashCommand {
         );
 
         return region;
+    }
+
+    // ─── /stash lanes ────────────────────────────────────────────────────────
+
+    /*? if >=26.1 {*//*
+    private static com.mojang.brigadier.builder.LiteralArgumentBuilder<
+            net.fabricmc.fabric.api.client.command.v2.FabricClientCommandSource> buildLanesSubcommand() {
+
+        var lanes = ClientCommands.literal("lanes")
+    *//*?} else {*/
+    private static com.mojang.brigadier.builder.LiteralArgumentBuilder<
+            net.fabricmc.fabric.api.client.command.v2.FabricClientCommandSource> buildLanesSubcommand() {
+
+        var lanes = ClientCommandManager.literal("lanes")
+    /*?}*/
+                .executes(ctx -> {
+                    ChatHelper.labelled("Lanes", "§lStorage Lane Manager");
+                    ChatHelper.labelled("Lanes", "§7/stash lanes region pos1/pos2 §8— set region corners");
+                    ChatHelper.labelled("Lanes", "§7/stash lanes scan §8— scan region for lanes");
+                    ChatHelper.labelled("Lanes", "§7/stash lanes preview §8— preview pending lanes");
+                    ChatHelper.labelled("Lanes", "§7/stash lanes accept §8— save pending lanes to database");
+                    ChatHelper.labelled("Lanes", "§7/stash lanes list §8— list accepted lanes");
+                    ChatHelper.labelled("Lanes", "§7/stash lanes clear §8— delete all accepted lanes");
+                    ChatHelper.labelled("Lanes", "§7/stash lanes create <name> [item] §8— create a manual lane");
+                    ChatHelper.labelled("Lanes", "§7/stash lanes addchest <name> §8— add looked-at chest to a lane");
+                    ChatHelper.labelled("Lanes", "§7/stash lanes addinput <name> §8— add looked-at hopper/container as input");
+                    ChatHelper.labelled("Lanes", "§7/stash lanes setmode <name> <mode> §8— set direct_fill/input_only/hybrid");
+                    ChatHelper.labelled("Lanes", "§7/stash lanes setface <name> <direction> §8— set lane front face");
+                    ChatHelper.labelled("Lanes", "§7/stash lanes remove <name> §8— remove a lane");
+                    ChatHelper.labelled("Lanes", "§7/stash lanes assign <item> §8— assign item to looked-at chest");
+                    ChatHelper.labelled("Lanes", "§7/stash lanes sort preview §8— preview inventory moves");
+                    ChatHelper.labelled("Lanes", "§7/stash lanes sort §8— sort inventory into lanes");
+                    ChatHelper.labelled("Lanes", "§7/stash lanes sort stop §8— stop the sorter");
+                    ChatHelper.labelled("Lanes", "§7/stash lanes label preview §8— preview label positions");
+                    ChatHelper.labelled("Lanes", "§7/stash lanes label run §8— label run stub / future placement flow");
+                    return 1;
+                });
+
+        // /stash lanes region pos1 [x y z]
+        // /stash lanes region pos2 [x y z]
+        /*? if >=26.1 {*//*
+        var laneRegion = ClientCommands.literal("region");
+        var pos1Lit = ClientCommands.literal("pos1");
+        var pos2Lit = ClientCommands.literal("pos2");
+        *//*?} else {*/
+        var laneRegion = ClientCommandManager.literal("region");
+        var pos1Lit = ClientCommandManager.literal("pos1");
+        var pos2Lit = ClientCommandManager.literal("pos2");
+        /*?}*/
+
+        // pos1 with optional x y z arguments
+        /*? if >=26.1 {*//*
+        pos1Lit.then(ClientCommands.argument("x", IntegerArgumentType.integer())
+                .then(ClientCommands.argument("y", IntegerArgumentType.integer())
+                        .then(ClientCommands.argument("z", IntegerArgumentType.integer())
+                                .executes(ctx -> {
+                                    int x = IntegerArgumentType.getInteger(ctx, "x");
+                                    int y = IntegerArgumentType.getInteger(ctx, "y");
+                                    int z = IntegerArgumentType.getInteger(ctx, "z");
+                                    MoarMod.getLaneManager().setCorner1(new BlockPos(x, y, z));
+                                    ChatHelper.labelled("Lanes", "§aPos1 set to §f" + x + ", " + y + ", " + z);
+                                    return 1;
+                                }))));
+        *//*?} else {*/
+        pos1Lit.then(ClientCommandManager.argument("x", IntegerArgumentType.integer())
+                .then(ClientCommandManager.argument("y", IntegerArgumentType.integer())
+                        .then(ClientCommandManager.argument("z", IntegerArgumentType.integer())
+                                .executes(ctx -> {
+                                    int x = IntegerArgumentType.getInteger(ctx, "x");
+                                    int y = IntegerArgumentType.getInteger(ctx, "y");
+                                    int z = IntegerArgumentType.getInteger(ctx, "z");
+                                    MoarMod.getLaneManager().setCorner1(new BlockPos(x, y, z));
+                                    ChatHelper.labelled("Lanes", "§aPos1 set to §f" + x + ", " + y + ", " + z);
+                                    return 1;
+                                }))));
+        /*?}*/
+
+        pos1Lit.executes(ctx -> {
+            /*? if >=26.1 {*//*
+            Minecraft mc = Minecraft.getInstance();
+            if (mc == null || mc.player == null) return 0;
+            BlockPos pos = mc.player.blockPosition();
+            *//*?} else {*/
+            MinecraftClient mc = MinecraftClient.getInstance();
+            if (mc == null || mc.player == null) return 0;
+            BlockPos pos = mc.player.getBlockPos();
+            /*?}*/
+            MoarMod.getLaneManager().setCorner1(pos);
+            ChatHelper.labelled("Lanes", "§aPos1 set to §f" + pos.getX() + ", " + pos.getY() + ", " + pos.getZ());
+            return 1;
+        });
+
+        // pos2 with optional x y z arguments
+        /*? if >=26.1 {*//*
+        pos2Lit.then(ClientCommands.argument("x", IntegerArgumentType.integer())
+                .then(ClientCommands.argument("y", IntegerArgumentType.integer())
+                        .then(ClientCommands.argument("z", IntegerArgumentType.integer())
+                                .executes(ctx -> {
+                                    int x = IntegerArgumentType.getInteger(ctx, "x");
+                                    int y = IntegerArgumentType.getInteger(ctx, "y");
+                                    int z = IntegerArgumentType.getInteger(ctx, "z");
+                                    MoarMod.getLaneManager().setCorner2(new BlockPos(x, y, z));
+                                    ChatHelper.labelled("Lanes", "§aPos2 set to §f" + x + ", " + y + ", " + z);
+                                    return 1;
+                                }))));
+        *//*?} else {*/
+        pos2Lit.then(ClientCommandManager.argument("x", IntegerArgumentType.integer())
+                .then(ClientCommandManager.argument("y", IntegerArgumentType.integer())
+                        .then(ClientCommandManager.argument("z", IntegerArgumentType.integer())
+                                .executes(ctx -> {
+                                    int x = IntegerArgumentType.getInteger(ctx, "x");
+                                    int y = IntegerArgumentType.getInteger(ctx, "y");
+                                    int z = IntegerArgumentType.getInteger(ctx, "z");
+                                    MoarMod.getLaneManager().setCorner2(new BlockPos(x, y, z));
+                                    ChatHelper.labelled("Lanes", "§aPos2 set to §f" + x + ", " + y + ", " + z);
+                                    return 1;
+                                }))));
+        /*?}*/
+
+        pos2Lit.executes(ctx -> {
+            /*? if >=26.1 {*//*
+            Minecraft mc = Minecraft.getInstance();
+            if (mc == null || mc.player == null) return 0;
+            BlockPos pos = mc.player.blockPosition();
+            *//*?} else {*/
+            MinecraftClient mc = MinecraftClient.getInstance();
+            if (mc == null || mc.player == null) return 0;
+            BlockPos pos = mc.player.getBlockPos();
+            /*?}*/
+            MoarMod.getLaneManager().setCorner2(pos);
+            ChatHelper.labelled("Lanes", "§aPos2 set to §f" + pos.getX() + ", " + pos.getY() + ", " + pos.getZ());
+            return 1;
+        });
+
+        laneRegion.then(pos1Lit);
+        laneRegion.then(pos2Lit);
+        lanes.then(laneRegion);
+
+        // /stash lanes scan
+        /*? if >=26.1 {*//*
+        lanes.then(ClientCommands.literal("scan").executes(ctx -> {
+        *//*?} else {*/
+        lanes.then(ClientCommandManager.literal("scan").executes(ctx -> {
+        /*?}*/
+            MoarMod.getLaneManager().scan();
+            return 1;
+        }));
+
+        // /stash lanes preview
+        /*? if >=26.1 {*//*
+        lanes.then(ClientCommands.literal("preview").executes(ctx -> {
+        *//*?} else {*/
+        lanes.then(ClientCommandManager.literal("preview").executes(ctx -> {
+        /*?}*/
+            MoarMod.getLaneManager().preview();
+            return 1;
+        }));
+
+        // /stash lanes accept
+        /*? if >=26.1 {*//*
+        lanes.then(ClientCommands.literal("accept").executes(ctx -> {
+        *//*?} else {*/
+        lanes.then(ClientCommandManager.literal("accept").executes(ctx -> {
+        /*?}*/
+            MoarMod.getLaneManager().accept();
+            return 1;
+        }));
+
+        // /stash lanes list
+        /*? if >=26.1 {*//*
+        lanes.then(ClientCommands.literal("list").executes(ctx -> {
+        *//*?} else {*/
+        lanes.then(ClientCommandManager.literal("list").executes(ctx -> {
+        /*?}*/
+            MoarMod.getLaneManager().list();
+            return 1;
+        }));
+
+        // /stash lanes clear
+        /*? if >=26.1 {*//*
+        lanes.then(ClientCommands.literal("clear").executes(ctx -> {
+        *//*?} else {*/
+        lanes.then(ClientCommandManager.literal("clear").executes(ctx -> {
+        /*?}*/
+            MoarMod.getLaneManager().clearLanes();
+            return 1;
+        }));
+
+        // /stash lanes create <name> [item]
+        /*? if >=26.1 {*//*
+        lanes.then(ClientCommands.literal("create")
+                .then(ClientCommands.argument("name", StringArgumentType.word())
+                        .executes(ctx -> {
+                            String name = StringArgumentType.getString(ctx, "name");
+                            return MoarMod.getLaneManager().createLane(name, null) ? 1 : 0;
+                        })
+                        .then(ClientCommands.argument("item", StringArgumentType.word())
+                                .suggests(SUGGEST_ITEMS)
+                                .executes(ctx -> {
+                                    String name = StringArgumentType.getString(ctx, "name");
+                                    String raw = StringArgumentType.getString(ctx, "item");
+                                    String itemId = raw.contains(":") ? raw : "minecraft:" + raw;
+                                    return MoarMod.getLaneManager().createLane(name, itemId) ? 1 : 0;
+                                }))));
+        *//*?} else {*/
+        lanes.then(ClientCommandManager.literal("create")
+                .then(ClientCommandManager.argument("name", StringArgumentType.word())
+                        .executes(ctx -> {
+                            String name = StringArgumentType.getString(ctx, "name");
+                            return MoarMod.getLaneManager().createLane(name, null) ? 1 : 0;
+                        })
+                        .then(ClientCommandManager.argument("item", StringArgumentType.word())
+                                .suggests(SUGGEST_ITEMS)
+                                .executes(ctx -> {
+                                    String name = StringArgumentType.getString(ctx, "name");
+                                    String raw = StringArgumentType.getString(ctx, "item");
+                                    String itemId = raw.contains(":") ? raw : "minecraft:" + raw;
+                                    return MoarMod.getLaneManager().createLane(name, itemId) ? 1 : 0;
+                                }))));
+        /*?}*/
+
+        // /stash lanes addchest <name>
+        /*? if >=26.1 {*//*
+        lanes.then(ClientCommands.literal("addchest")
+                .then(ClientCommands.argument("name", StringArgumentType.word())
+                        .suggests(SUGGEST_LANES)
+                        .executes(ctx -> {
+                            Minecraft mc = Minecraft.getInstance();
+                            if (mc == null || mc.player == null) return 0;
+                            BlockPos pos = findTargetContainer(mc);
+                            if (pos == null) {
+                                ChatHelper.labelled("Lanes", "§cLook at a chest, barrel, or shulker box.");
+                                return 0;
+                            }
+                            String name = StringArgumentType.getString(ctx, "name");
+                            return MoarMod.getLaneManager().addChestToLane(name, pos) ? 1 : 0;
+                        })));
+        *//*?} else {*/
+        lanes.then(ClientCommandManager.literal("addchest")
+                .then(ClientCommandManager.argument("name", StringArgumentType.word())
+                        .suggests(SUGGEST_LANES)
+                        .executes(ctx -> {
+                            MinecraftClient mc = MinecraftClient.getInstance();
+                            if (mc == null || mc.player == null) return 0;
+                            BlockPos pos = findTargetContainer(mc);
+                            if (pos == null) {
+                                ChatHelper.labelled("Lanes", "§cLook at a chest, barrel, or shulker box.");
+                                return 0;
+                            }
+                            String name = StringArgumentType.getString(ctx, "name");
+                            return MoarMod.getLaneManager().addChestToLane(name, pos) ? 1 : 0;
+                        })));
+        /*?}*/
+
+        // /stash lanes addinput <name>
+        /*? if >=26.1 {*//*
+        lanes.then(ClientCommands.literal("addinput")
+                .then(ClientCommands.argument("name", StringArgumentType.word())
+                        .suggests(SUGGEST_LANES)
+                        .executes(ctx -> {
+                            Minecraft mc = Minecraft.getInstance();
+                            if (mc == null || mc.player == null) return 0;
+                            BlockPos pos = findTargetInput(mc);
+                            if (pos == null) {
+                                ChatHelper.labelled("Lanes", "§cLook at a hopper, chest, barrel, or shulker box.");
+                                return 0;
+                            }
+                            String name = StringArgumentType.getString(ctx, "name");
+                            return MoarMod.getLaneManager().addInputToLane(name, pos) ? 1 : 0;
+                        })));
+        *//*?} else {*/
+        lanes.then(ClientCommandManager.literal("addinput")
+                .then(ClientCommandManager.argument("name", StringArgumentType.word())
+                        .suggests(SUGGEST_LANES)
+                        .executes(ctx -> {
+                            MinecraftClient mc = MinecraftClient.getInstance();
+                            if (mc == null || mc.player == null) return 0;
+                            BlockPos pos = findTargetInput(mc);
+                            if (pos == null) {
+                                ChatHelper.labelled("Lanes", "§cLook at a hopper, chest, barrel, or shulker box.");
+                                return 0;
+                            }
+                            String name = StringArgumentType.getString(ctx, "name");
+                            return MoarMod.getLaneManager().addInputToLane(name, pos) ? 1 : 0;
+                        })));
+        /*?}*/
+
+        // /stash lanes setmode <name> <mode>
+        /*? if >=26.1 {*//*
+        lanes.then(ClientCommands.literal("setmode")
+                .then(ClientCommands.argument("name", StringArgumentType.word())
+                        .suggests(SUGGEST_LANES)
+                        .then(ClientCommands.argument("mode", StringArgumentType.word())
+                                .suggests(SUGGEST_LANE_MODES)
+                                .executes(ctx -> {
+                                    String name = StringArgumentType.getString(ctx, "name");
+                                    String rawMode = StringArgumentType.getString(ctx, "mode");
+                                    try {
+                                        StorageLane.DepositMode mode = StorageLane.DepositMode.valueOf(
+                                                rawMode.toUpperCase(java.util.Locale.ROOT));
+                                        return MoarMod.getLaneManager().setLaneMode(name, mode) ? 1 : 0;
+                                    } catch (IllegalArgumentException e) {
+                                        ChatHelper.labelled("Lanes", "§cUnknown lane mode §f" + rawMode
+                                                + "§c. Use direct_fill, input_only, or hybrid.");
+                                        return 0;
+                                    }
+                                }))));
+        *//*?} else {*/
+        lanes.then(ClientCommandManager.literal("setmode")
+                .then(ClientCommandManager.argument("name", StringArgumentType.word())
+                        .suggests(SUGGEST_LANES)
+                        .then(ClientCommandManager.argument("mode", StringArgumentType.word())
+                                .suggests(SUGGEST_LANE_MODES)
+                                .executes(ctx -> {
+                                    String name = StringArgumentType.getString(ctx, "name");
+                                    String rawMode = StringArgumentType.getString(ctx, "mode");
+                                    try {
+                                        StorageLane.DepositMode mode = StorageLane.DepositMode.valueOf(
+                                                rawMode.toUpperCase(java.util.Locale.ROOT));
+                                        return MoarMod.getLaneManager().setLaneMode(name, mode) ? 1 : 0;
+                                    } catch (IllegalArgumentException e) {
+                                        ChatHelper.labelled("Lanes", "§cUnknown lane mode §f" + rawMode
+                                                + "§c. Use direct_fill, input_only, or hybrid.");
+                                        return 0;
+                                    }
+                                }))));
+        /*?}*/
+
+        // /stash lanes setface <name> <direction>
+        /*? if >=26.1 {*//*
+        lanes.then(ClientCommands.literal("setface")
+                .then(ClientCommands.argument("name", StringArgumentType.word())
+                        .suggests(SUGGEST_LANES)
+                        .then(ClientCommands.argument("direction", StringArgumentType.word())
+                                .suggests(SUGGEST_DIRECTIONS)
+                                .executes(ctx -> {
+                                    String name = StringArgumentType.getString(ctx, "name");
+                                    String rawDirection = StringArgumentType.getString(ctx, "direction");
+                                    try {
+                                        var face = net.minecraft.core.Direction.valueOf(
+                                                rawDirection.toUpperCase(java.util.Locale.ROOT));
+                                        return MoarMod.getLaneManager().setLaneFace(name, face) ? 1 : 0;
+                                    } catch (IllegalArgumentException e) {
+                                        ChatHelper.labelled("Lanes", "§cUnknown direction §f" + rawDirection + "§c.");
+                                        return 0;
+                                    }
+                                }))));
+        *//*?} else {*/
+        lanes.then(ClientCommandManager.literal("setface")
+                .then(ClientCommandManager.argument("name", StringArgumentType.word())
+                        .suggests(SUGGEST_LANES)
+                        .then(ClientCommandManager.argument("direction", StringArgumentType.word())
+                                .suggests(SUGGEST_DIRECTIONS)
+                                .executes(ctx -> {
+                                    String name = StringArgumentType.getString(ctx, "name");
+                                    String rawDirection = StringArgumentType.getString(ctx, "direction");
+                                    try {
+                                        var face = net.minecraft.util.math.Direction.valueOf(
+                                                rawDirection.toUpperCase(java.util.Locale.ROOT));
+                                        return MoarMod.getLaneManager().setLaneFace(name, face) ? 1 : 0;
+                                    } catch (IllegalArgumentException e) {
+                                        ChatHelper.labelled("Lanes", "§cUnknown direction §f" + rawDirection + "§c.");
+                                        return 0;
+                                    }
+                                }))));
+        /*?}*/
+
+        // /stash lanes remove <name>
+        /*? if >=26.1 {*//*
+        lanes.then(ClientCommands.literal("remove")
+                .then(ClientCommands.argument("name", StringArgumentType.word())
+                        .suggests(SUGGEST_LANES)
+                        .executes(ctx -> {
+                            String name = StringArgumentType.getString(ctx, "name");
+                            return MoarMod.getLaneManager().removeLane(name) ? 1 : 0;
+                        })));
+        *//*?} else {*/
+        lanes.then(ClientCommandManager.literal("remove")
+                .then(ClientCommandManager.argument("name", StringArgumentType.word())
+                        .suggests(SUGGEST_LANES)
+                        .executes(ctx -> {
+                            String name = StringArgumentType.getString(ctx, "name");
+                            return MoarMod.getLaneManager().removeLane(name) ? 1 : 0;
+                        })));
+        /*?}*/
+
+        // /stash lanes assign <item>
+        /*? if >=26.1 {*//*
+        lanes.then(ClientCommands.literal("assign")
+                .then(ClientCommands.argument("item", StringArgumentType.word())
+                        .suggests(SUGGEST_ITEMS)
+        *//*?} else {*/
+        lanes.then(ClientCommandManager.literal("assign")
+                .then(ClientCommandManager.argument("item", StringArgumentType.word())
+                        .suggests(SUGGEST_ITEMS)
+        /*?}*/
+                        .executes(ctx -> {
+                            String raw = StringArgumentType.getString(ctx, "item");
+                            // Expand short names to full namespaced IDs
+                            String itemId = raw.contains(":") ? raw : "minecraft:" + raw;
+
+                            /*? if >=26.1 {*//*
+                            Minecraft mc = Minecraft.getInstance();
+                            *//*?} else {*/
+                            MinecraftClient mc = MinecraftClient.getInstance();
+                            /*?}*/
+                            if (mc == null || mc.player == null) return 0;
+
+                            BlockPos pos = findTargetContainer(mc);
+                            if (pos == null) {
+                                ChatHelper.labelled("Lanes", "§cLook at a chest/barrel to assign an item.");
+                                return 0;
+                            }
+
+                            LaneManager lm = MoarMod.getLaneManager();
+                            boolean found = lm.assignItem(pos, itemId);
+                            if (!found) {
+                                // Check pending lanes too (before accept)
+                                StorageLane pending = lm.findPendingLaneByChest(pos);
+                                if (pending != null) {
+                                    pending.setItemId(itemId);
+                                    ChatHelper.labelled("Lanes", "§aAssigned §f" + itemId
+                                            + "§a to pending lane §f" + pending.getName()
+                                            + "§7 (run §f/stash lanes accept §7to persist)");
+                                } else {
+                                    ChatHelper.labelled("Lanes", "§cNo lane found containing that chest. "
+                                            + "Scan and accept lanes first.");
+                                    return 0;
+                                }
+                            } else {
+                                ChatHelper.labelled("Lanes", "§aAssigned §f" + itemId + "§a to lane.");
+                            }
+                            return 1;
+                        })));
+
+        // /stash lanes sort [stop]
+        /*? if >=26.1 {*//*
+        var sortLit = ClientCommands.literal("sort");
+        sortLit.then(ClientCommands.literal("preview").executes(ctx -> {
+        *//*?} else {*/
+        var sortLit = ClientCommandManager.literal("sort");
+        sortLit.then(ClientCommandManager.literal("preview").executes(ctx -> {
+        /*?}*/
+            return MoarMod.getLaneManager().previewSort() ? 1 : 0;
+        }));
+        /*? if >=26.1 {*//*
+        sortLit.then(ClientCommands.literal("stop").executes(ctx -> {
+        *//*?} else {*/
+        sortLit.then(ClientCommandManager.literal("stop").executes(ctx -> {
+        /*?}*/
+            MoarMod.getLaneManager().stopSort();
+            return 1;
+        }));
+        sortLit.executes(ctx -> {
+            MoarMod.getLaneManager().startSort();
+            return 1;
+        });
+        lanes.then(sortLit);
+
+        // /stash lanes label [preview|run]
+        /*? if >=26.1 {*//*
+        var labelLit = ClientCommands.literal("label");
+        labelLit.then(ClientCommands.literal("preview").executes(ctx -> {
+        *//*?} else {*/
+        var labelLit = ClientCommandManager.literal("label");
+        labelLit.then(ClientCommandManager.literal("preview").executes(ctx -> {
+        /*?}*/
+            MoarMod.getLaneManager().labelPreview();
+            return 1;
+        }));
+        /*? if >=26.1 {*//*
+        labelLit.then(ClientCommands.literal("run").executes(ctx -> {
+        *//*?} else {*/
+        labelLit.then(ClientCommandManager.literal("run").executes(ctx -> {
+        /*?}*/
+            MoarMod.getLaneManager().labelRun();
+            return 1;
+        }));
+        lanes.then(labelLit);
+
+        return lanes;
     }
 }

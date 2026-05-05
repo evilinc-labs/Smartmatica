@@ -1,5 +1,7 @@
 package dev.moar.util;
 
+import dev.moar.world.SetbackMonitor;
+
 /*? if >=26.1 {*//*
 import net.minecraft.world.level.block.*;
 import net.minecraft.world.level.block.state.*;
@@ -185,8 +187,13 @@ public final class PlacementEngine {
     private static float      savedYaw;
     private static float      savedPitch;
     private static int        rotateTicks;
-    private static final int  INVENTORY_SWAP_SETTLE_TICKS = 2;
+    private static final int  HOTBAR_SELECT_SETTLE_TICKS = 2;
+    private static final int  INVENTORY_SWAP_SETTLE_TICKS = 4;
     private static int        inventorySwapSettleTicks;
+    private static Item       lastPlacementItem;
+    private static int        itemVarietyCooldownTicks;
+    private static final int  ITEM_VARIETY_SETTLE_TICKS = 2;
+    private static final int  SETBACK_RECENT_WINDOW_TICKS = 40;
 
     // self-correction state
     /** Position of a block that was placed with wrong orientation. */
@@ -293,6 +300,7 @@ public final class PlacementEngine {
         if (mc.world == null) return;
         /*?}*/
         if (inventorySwapSettleTicks > 0) inventorySwapSettleTicks--;
+        if (itemVarietyCooldownTicks > 0) itemVarietyCooldownTicks--;
         /*? if >=26.1 {*//*
         long currentTick = mc.level.getGameTime();
         *//*?} else {*/
@@ -381,6 +389,8 @@ public final class PlacementEngine {
 
     public static boolean canPlace() {
         if (phase != PlacePhase.IDLE) return false;
+        if (!isPlacementWindowSafe()) return false;
+        if (inventorySwapSettleTicks > 0 || itemVarietyCooldownTicks > 0) return false;
         long nowNano = System.nanoTime();
 
         long intervalNano = 1_000_000_000L / bps;
@@ -460,6 +470,8 @@ public final class PlacementEngine {
         singleTickInProgress = false;
         pendingItem = null;
         inventorySwapSettleTicks = 0;
+        itemVarietyCooldownTicks = 0;
+        lastPlacementItem = null;
         correctionTarget = null;
         correctionDesired = null;
         breakingTicks = 0;
@@ -679,7 +691,11 @@ public final class PlacementEngine {
         // A container SWAP can succeed client-side before the server treats the
         // new hotbar item as held. Waiting briefly avoids place packets racing
         // ahead of the inventory update.
-        if (inventorySwapSettleTicks > 0) {
+        if (inventorySwapSettleTicks > 0 || itemVarietyCooldownTicks > 0) {
+            return false;
+        }
+
+        if (!isPlacementWindowSafe()) {
             return false;
         }
 
@@ -1210,6 +1226,7 @@ public final class PlacementEngine {
         if (requiredItem == Items.AIR) return false;
 
         if (!selectItem(player, mc, requiredItem, allowSwap)) return false;
+        if (inventorySwapSettleTicks > 0 || itemVarietyCooldownTicks > 0) return true;
 
         /*? if >=26.1 {*//*
         if (!world.isUnobstructed(desired, target,
@@ -1417,6 +1434,7 @@ public final class PlacementEngine {
         }
 
         if (!selectItem(player, mc, bucketItem, allowSwap)) return false;
+        if (inventorySwapSettleTicks > 0 || itemVarietyCooldownTicks > 0) return true;
 
         Direction face = findPlacementFace(world, target);
         if (face == null) return false;
@@ -1554,7 +1572,8 @@ public final class PlacementEngine {
         Item requiredItem = states.get(0).getBlock().asItem();
         if (requiredItem == Items.AIR) return 0;
         if (!selectItem(player, mc, requiredItem, allowSwap)) return 0;
-        if (inventorySwapSettleTicks > 0) return 0;
+        if (inventorySwapSettleTicks > 0 || itemVarietyCooldownTicks > 0) return 0;
+        if (!isPlacementWindowSafe()) return 0;
 
         List<BatchEntry> entries = new ArrayList<>(BATCH_MAX);
         boolean needsSneak = false;
@@ -2259,11 +2278,20 @@ public final class PlacementEngine {
 
         // check current slot first
         /*? if >=26.1 {*//*
-        if (inv.getItem(inv.getSelectedSlot()).getItem() == item) return true;
+        if (inv.getItem(inv.getSelectedSlot()).getItem() == item) {
+            recordSelectedItem(item, false);
+            return true;
+        }
         *//*?} else if >=1.21.5 {*//*
-        if (inv.getStack(inv.getSelectedSlot()).getItem() == item) return true;
+        if (inv.getStack(inv.getSelectedSlot()).getItem() == item) {
+            recordSelectedItem(item, false);
+            return true;
+        }
         *//*?} else {*/
-        if (inv.getStack(inv.selectedSlot).getItem() == item) return true;
+        if (inv.getStack(inv.selectedSlot).getItem() == item) {
+            recordSelectedItem(item, false);
+            return true;
+        }
         /*?}*/
 
         // check rest of hotbar
@@ -2278,6 +2306,7 @@ public final class PlacementEngine {
                 *//*?} else {*/
                 inv.selectedSlot = i;
                 /*?}*/
+                recordSelectedItem(item, true);
                 return true;
             }
         }
@@ -2314,11 +2343,28 @@ public final class PlacementEngine {
                             player
                     );
                     inventorySwapSettleTicks = INVENTORY_SWAP_SETTLE_TICKS;
+                    recordSelectedItem(item, true);
                     return true;
                 }
             }
         }
         return false;
+    }
+
+    private static void recordSelectedItem(Item item, boolean changedSlot) {
+        if (lastPlacementItem != null && lastPlacementItem != item) {
+            itemVarietyCooldownTicks = Math.max(itemVarietyCooldownTicks, ITEM_VARIETY_SETTLE_TICKS);
+        }
+        if (changedSlot) {
+            itemVarietyCooldownTicks = Math.max(itemVarietyCooldownTicks, HOTBAR_SELECT_SETTLE_TICKS);
+        }
+        lastPlacementItem = item;
+    }
+
+    private static boolean isPlacementWindowSafe() {
+        SetbackMonitor monitor = SetbackMonitor.get();
+        return monitor.isCalm()
+                && monitor.recentSetbackCount(SETBACK_RECENT_WINDOW_TICKS) == 0;
     }
 
     /** Selects the best tool for breaking the given block. */

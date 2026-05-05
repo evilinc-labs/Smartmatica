@@ -138,26 +138,30 @@ public final class PrinterCommand {
                             return 0;
                         }
 
-                        // Correlate against Litematica SchematicWorld for exact anchor
-                        BlockPos pos = LitematicaDetector.detectAnchorFromSchematicWorld(
-                                printer.getSchematic());
-                        if (pos != null) {
-                            ChatHelper.info("§aAligned anchor from hologram blocks.");
-                        } else {
-                            List<LitematicaDetector.DetectedPlacement> placements =
-                                    SchematicPrinter.detectAllPlacements();
-                            LitematicaDetector.DetectedPlacement bestMatch = null;
-                            double bestDist = Double.MAX_VALUE;
-                            for (LitematicaDetector.DetectedPlacement p : placements) {
-                                double dx = p.originX() - mc.player.getX();
-                                double dz = p.originZ() - mc.player.getZ();
-                                double dist = dx * dx + dz * dz;
-                                if (dist < bestDist) {
-                                    bestDist = dist;
-                                    bestMatch = p;
-                                }
+                        List<LitematicaDetector.DetectedPlacement> placements =
+                                SchematicPrinter.detectAllPlacements();
+                        LitematicaDetector.DetectedPlacement bestMatch =
+                                findClosestPlacement(placements, mc.player.getX(), mc.player.getZ(), null, false);
+                        boolean nearbyUnsupportedPlacement = bestMatch != null
+                                && bestMatch.hasUnsupportedTransform()
+                                && horizontalDistance(bestMatch, mc.player.getX(), mc.player.getZ()) < 200;
+
+                        BlockPos pos = null;
+                        if (!nearbyUnsupportedPlacement) {
+                            pos = LitematicaDetector.detectAnchorFromSchematicWorld(
+                                    printer.getSchematic());
+                            if (pos != null) {
+                                ChatHelper.info("§aAligned anchor from hologram blocks.");
                             }
-                            if (bestMatch != null && Math.sqrt(bestDist) < 200) {
+                        } else {
+                            warnUnsupportedPlacement(bestMatch);
+                            ChatHelper.info("§7Skipping hologram alignment because MOAR can't map"
+                                    + " transformed Litematica placements yet.");
+                        }
+
+                        if (pos == null) {
+                            bestMatch = findClosestPlacement(placements, mc.player.getX(), mc.player.getZ(), null, true);
+                            if (bestMatch != null && horizontalDistance(bestMatch, mc.player.getX(), mc.player.getZ()) < 200) {
                                 pos = new BlockPos(
                                         bestMatch.originX() + printer.getSchematic().getOriginOffsetX(),
                                         bestMatch.originY() + printer.getSchematic().getOriginOffsetY(),
@@ -313,7 +317,10 @@ public final class PrinterCommand {
                             LitematicaDetector.DetectedPlacement p = placements.get(i);
                             ChatHelper.info(" §7" + (i + 1) + ". §f" + p.schematicPath().getFileName()
                                     + " §7at §e" + p.originX() + " " + p.originY() + " " + p.originZ()
-                                    + " §7(\"" + p.name() + "\")");
+                                    + " §7(\"" + p.name() + "\")"
+                                    + (p.hasUnsupportedTransform()
+                                    ? " §c[" + p.unsupportedTransformSummary() + "]"
+                                    : ""));
                         }
 
                         if (printer.tryAutoDetect()) {
@@ -892,8 +899,7 @@ public final class PrinterCommand {
         }
 
         try {
-            // Temporarily load with player position; we'll override if
-            // Litematica has a matching placement.
+            // Start at the player and align later if possible.
             /*? if >=26.1 {*//*
             BlockPos anchor = mc.player.blockPosition();
             *//*?} else {*/
@@ -901,30 +907,18 @@ public final class PrinterCommand {
             /*?}*/
             printer.loadSchematic(file, anchor);
 
-            // Try to match Litematica's active placement for this file
-            // so the anchor aligns with where the user placed it.
-            // If multiple placements of the same file exist, pick the
-            // one closest to the player.
+            // Prefer the nearest matching placement.
             String loadedFile = file.getFileName().toString();
             boolean matchedPlacement = false;
+            boolean sawUnsupportedPlacement = false;
             List<LitematicaDetector.DetectedPlacement> placements =
                     SchematicPrinter.detectAllPlacements();
-            LitematicaDetector.DetectedPlacement bestMatch = null;
-            double bestDist = Double.MAX_VALUE;
-            for (LitematicaDetector.DetectedPlacement p : placements) {
-                if (!p.schematicPath().getFileName().toString().equals(loadedFile)) continue;
-                double dx = p.originX() - mc.player.getX();
-                double dz = p.originZ() - mc.player.getZ();
-                double dist = dx * dx + dz * dz;
-                if (dist < bestDist) {
-                    bestDist = dist;
-                    bestMatch = p;
-                }
-            }
+            LitematicaDetector.DetectedPlacement unsupportedMatch =
+                    findClosestPlacement(placements, mc.player.getX(), mc.player.getZ(), loadedFile, false);
+            LitematicaDetector.DetectedPlacement bestMatch =
+                    findClosestPlacement(placements, mc.player.getX(), mc.player.getZ(), loadedFile, true);
             if (bestMatch != null) {
-                // Sanity-check: warn if the Litematica placement origin
-                // is at (0,0,0) — almost always means the user forgot to
-                // move the placement to their build site.
+                // Warn on default-origin placements.
                 if (bestMatch.originX() == 0 && bestMatch.originY() == 0 && bestMatch.originZ() == 0) {
                     ChatHelper.info("§e⚠ Litematica placement origin is (0, 0, 0)"
                             + " — did you move it to the build site?");
@@ -940,22 +934,29 @@ public final class PrinterCommand {
                     matchedPlacement = true;
                     ChatHelper.info("§aMatched Litematica placement.");
                 }
+            } else if (unsupportedMatch != null) {
+                sawUnsupportedPlacement = true;
+                warnUnsupportedPlacement(unsupportedMatch);
+                ChatHelper.info("§7Keeping the schematic anchored to your position instead.");
             }
 
             if (!matchedPlacement) {
-                ChatHelper.info("§7No Litematica placement found — anchored at your position."
-                        + " Use §f/printer here§7 to re-anchor.");
+                if (!sawUnsupportedPlacement) {
+                    ChatHelper.info("§7No Litematica placement found — anchored at your position."
+                            + " Use §f/printer here§7 to re-anchor.");
+                }
             }
 
-            // Final correction: correlate against Litematica's SchematicWorld
-            // hologram blocks to get the exact anchor position.
-            BlockPos correlated = LitematicaDetector.detectAnchorFromSchematicWorld(
-                    printer.getSchematic());
-            if (correlated != null) {
-                anchor = correlated;
-                printer.setAnchor(anchor);
-                matchedPlacement = true;
-                ChatHelper.info("§aAnchor aligned from hologram blocks.");
+            // Use hologram correlation for a final anchor fix.
+            if (!sawUnsupportedPlacement) {
+                BlockPos correlated = LitematicaDetector.detectAnchorFromSchematicWorld(
+                        printer.getSchematic());
+                if (correlated != null) {
+                    anchor = correlated;
+                    printer.setAnchor(anchor);
+                    matchedPlacement = true;
+                    ChatHelper.info("§aAnchor aligned from hologram blocks.");
+                }
             }
 
             ChatHelper.info("§aLoaded §f" + printer.getSchematic().getName()
@@ -998,7 +999,49 @@ public final class PrinterCommand {
         return MoarMod.getPrinter();
     }
 
-    // Finds the container block the player is targeting (crosshair > feet > below).
+    private static LitematicaDetector.DetectedPlacement findClosestPlacement(
+            List<LitematicaDetector.DetectedPlacement> placements,
+            double playerX,
+            double playerZ,
+            String requiredFile,
+            boolean supportedOnly) {
+        LitematicaDetector.DetectedPlacement bestMatch = null;
+        double bestDist = Double.MAX_VALUE;
+
+        for (LitematicaDetector.DetectedPlacement placement : placements) {
+            if (requiredFile != null
+                    && !placement.schematicPath().getFileName().toString().equals(requiredFile)) {
+                continue;
+            }
+            if (supportedOnly && placement.hasUnsupportedTransform()) {
+                continue;
+            }
+
+            double dist = horizontalDistance(placement, playerX, playerZ);
+            if (dist < bestDist) {
+                bestDist = dist;
+                bestMatch = placement;
+            }
+        }
+
+        return bestMatch;
+    }
+
+    private static double horizontalDistance(LitematicaDetector.DetectedPlacement placement,
+                                             double playerX, double playerZ) {
+        double dx = placement.originX() - playerX;
+        double dz = placement.originZ() - playerZ;
+        return Math.sqrt(dx * dx + dz * dz);
+    }
+
+    private static void warnUnsupportedPlacement(LitematicaDetector.DetectedPlacement placement) {
+        ChatHelper.info("§e⚠ Matching Litematica placement uses an unsupported transform.");
+        ChatHelper.info("§7Details: §f" + placement.unsupportedTransformSummary());
+        ChatHelper.info("§7Reset the placement to no rotation/mirror and default sub-region placement"
+                + " if you want MOAR to align to it automatically.");
+    }
+
+    // Find the targeted container: crosshair, feet, then below.
     /*? if >=26.1 {*//*
     private static BlockPos findTargetContainer(Minecraft mc) {
     *//*?} else {*/
@@ -1010,7 +1053,7 @@ public final class PrinterCommand {
         if (mc.player == null || mc.world == null) return null;
         /*?}*/
 
-        // 1. Crosshair target — the block the player is looking at
+        // Check the crosshair target.
         /*? if >=26.1 {*//*
         if (mc.hitResult instanceof BlockHitResult bhr
         *//*?} else {*/
@@ -1035,7 +1078,7 @@ public final class PrinterCommand {
             }
         }
 
-        // 2. Feet position
+        // Check the feet block.
         /*? if >=26.1 {*//*
         BlockPos feet = mc.player.blockPosition();
         *//*?} else {*/
@@ -1049,7 +1092,7 @@ public final class PrinterCommand {
             return feet;
         }
 
-        // 3. Below feet (standing on top of a chest)
+        // Check below the feet.
         /*? if >=26.1 {*//*
         BlockPos below = feet.below();
         *//*?} else {*/

@@ -1,12 +1,15 @@
 package dev.moar.stash;
 
+import dev.moar.lanes.StorageLane;
 import dev.moar.stash.StashManager.ContainerEntry;
 import dev.moar.stash.StashManager.ShulkerDetail;
 import net.fabricmc.loader.api.FabricLoader;
 /*? if >=26.1 {*//*
 import net.minecraft.core.BlockPos;
+import net.minecraft.core.Direction;
 *//*?} else {*/
 import net.minecraft.util.math.BlockPos;
+import net.minecraft.util.math.Direction;
 /*?}*/
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -223,6 +226,49 @@ public final class StashDatabase {
                     FOREIGN KEY (kit_name) REFERENCES kits(name) ON DELETE CASCADE
                 )
                 """);
+
+            // Storage-lane tables
+            stmt.executeUpdate("""
+                CREATE TABLE IF NOT EXISTS lane_config (
+                    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name              TEXT    NOT NULL,
+                    item_id           TEXT    DEFAULT NULL,
+                    frame_x           INTEGER DEFAULT NULL,
+                    frame_y           INTEGER DEFAULT NULL,
+                    frame_z           INTEGER DEFAULT NULL,
+                    front_face        TEXT    DEFAULT NULL,
+                    deposit_mode      TEXT    NOT NULL DEFAULT 'DIRECT_FILL',
+                    priority          INTEGER NOT NULL DEFAULT 0,
+                    overflow_behavior TEXT    NOT NULL DEFAULT 'SKIP',
+                    created_at        INTEGER NOT NULL
+                )
+                """);
+
+            stmt.executeUpdate("""
+                CREATE TABLE IF NOT EXISTS lane_chests (
+                    lane_id INTEGER NOT NULL,
+                    seq     INTEGER NOT NULL,
+                    x       INTEGER NOT NULL,
+                    y       INTEGER NOT NULL,
+                    z       INTEGER NOT NULL,
+                    PRIMARY KEY (lane_id, seq),
+                    FOREIGN KEY (lane_id) REFERENCES lane_config(id) ON DELETE CASCADE
+                )
+                """);
+
+            stmt.executeUpdate("""
+                CREATE TABLE IF NOT EXISTS lane_inputs (
+                    lane_id INTEGER NOT NULL,
+                    seq     INTEGER NOT NULL,
+                    x       INTEGER NOT NULL,
+                    y       INTEGER NOT NULL,
+                    z       INTEGER NOT NULL,
+                    PRIMARY KEY (lane_id, seq),
+                    FOREIGN KEY (lane_id) REFERENCES lane_config(id) ON DELETE CASCADE
+                )
+                """);
+
+            migrateAddLaneFrontFace(stmt);
         }
         connection.commit();
     }
@@ -231,6 +277,15 @@ public final class StashDatabase {
     private void migrateAddLabel(Statement stmt) {
         try {
             stmt.executeUpdate("ALTER TABLE containers ADD COLUMN label TEXT DEFAULT NULL");
+        } catch (SQLException ignored) {
+            // Column already exists — expected on non-first run
+        }
+    }
+
+    /** Safely add the front_face column to lane_config for existing databases. */
+    private void migrateAddLaneFrontFace(Statement stmt) {
+        try {
+            stmt.executeUpdate("ALTER TABLE lane_config ADD COLUMN front_face TEXT DEFAULT NULL");
         } catch (SQLException ignored) {
             // Column already exists — expected on non-first run
         }
@@ -1199,6 +1254,244 @@ public final class StashDatabase {
             }
         } catch (SQLException e) {
             return 0;
+        }
+    }
+
+    // ── Storage Lane CRUD ──────────────────────────────────────────────────────
+
+    /**
+     * Persist a StorageLane (insert-only). Updates lane.id on success.
+     * Returns true on success.
+     */
+    public boolean saveLane(StorageLane lane) {
+        if (!isOpen()) return false;
+        try {
+            long laneId;
+            try (PreparedStatement ps = connection.prepareStatement(
+                    "INSERT INTO lane_config (name, item_id, frame_x, frame_y, frame_z, front_face, "
+                            + "deposit_mode, priority, overflow_behavior, created_at) "
+                            + "VALUES (?,?,?,?,?,?,?,?,?,?)",
+                    Statement.RETURN_GENERATED_KEYS)) {
+                ps.setString(1, lane.getName());
+                ps.setString(2, lane.getItemId());           // may be null
+                if (lane.getLabelFramePos() != null) {
+                    ps.setInt(3, lane.getLabelFramePos().getX());
+                    ps.setInt(4, lane.getLabelFramePos().getY());
+                    ps.setInt(5, lane.getLabelFramePos().getZ());
+                } else {
+                    ps.setNull(3, java.sql.Types.INTEGER);
+                    ps.setNull(4, java.sql.Types.INTEGER);
+                    ps.setNull(5, java.sql.Types.INTEGER);
+                }
+                ps.setString(6, lane.getFrontFace() != null ? lane.getFrontFace().name() : null);
+                ps.setString(7, lane.getDepositMode().name());
+                ps.setInt(8, lane.getPriority());
+                ps.setString(9, lane.getOverflowBehavior().name());
+                ps.setLong(10, System.currentTimeMillis());
+                ps.executeUpdate();
+                try (ResultSet keys = ps.getGeneratedKeys()) {
+                    keys.next();
+                    laneId = keys.getLong(1);
+                }
+            }
+
+            insertLanePositions(laneId, "lane_chests", lane.getChestPositions());
+            insertLanePositions(laneId, "lane_inputs", lane.getInputPositions());
+
+            connection.commit();
+            lane.setId((int) laneId);
+            return true;
+        } catch (SQLException e) {
+            LOGGER.error("Failed to save lane '{}'", lane.getName(), e);
+            rollback();
+            return false;
+        }
+    }
+
+    private void insertLanePositions(long laneId, String table, List<BlockPos> positions)
+            throws SQLException {
+        if (positions.isEmpty()) return;
+        try (PreparedStatement ps = connection.prepareStatement(
+                "INSERT INTO " + table + " (lane_id, seq, x, y, z) VALUES (?,?,?,?,?)")) {
+            int seq = 0;
+            for (BlockPos pos : positions) {
+                ps.setLong(1, laneId);
+                ps.setInt(2, seq++);
+                ps.setInt(3, pos.getX());
+                ps.setInt(4, pos.getY());
+                ps.setInt(5, pos.getZ());
+                ps.addBatch();
+            }
+            ps.executeBatch();
+        }
+    }
+
+    /** Update the item assignment for an existing lane. */
+    public boolean updateLaneItem(int laneId, String itemId) {
+        if (!isOpen()) return false;
+        try (PreparedStatement ps = connection.prepareStatement(
+                "UPDATE lane_config SET item_id=? WHERE id=?")) {
+            ps.setString(1, itemId);
+            ps.setInt(2, laneId);
+            int rows = ps.executeUpdate();
+            connection.commit();
+            return rows > 0;
+        } catch (SQLException e) {
+            LOGGER.error("Failed to update lane item for id={}", laneId, e);
+            rollback();
+            return false;
+        }
+    }
+
+    /** Update an existing lane's metadata and positions in place. */
+    public boolean updateLane(StorageLane lane) {
+        if (!isOpen() || lane.getId() == 0) return false;
+        try {
+            try (PreparedStatement ps = connection.prepareStatement(
+                    "UPDATE lane_config SET name=?, item_id=?, frame_x=?, frame_y=?, frame_z=?, "
+                            + "front_face=?, deposit_mode=?, priority=?, overflow_behavior=? WHERE id=?")) {
+                ps.setString(1, lane.getName());
+                ps.setString(2, lane.getItemId());
+                if (lane.getLabelFramePos() != null) {
+                    ps.setInt(3, lane.getLabelFramePos().getX());
+                    ps.setInt(4, lane.getLabelFramePos().getY());
+                    ps.setInt(5, lane.getLabelFramePos().getZ());
+                } else {
+                    ps.setNull(3, java.sql.Types.INTEGER);
+                    ps.setNull(4, java.sql.Types.INTEGER);
+                    ps.setNull(5, java.sql.Types.INTEGER);
+                }
+                ps.setString(6, lane.getFrontFace() != null ? lane.getFrontFace().name() : null);
+                ps.setString(7, lane.getDepositMode().name());
+                ps.setInt(8, lane.getPriority());
+                ps.setString(9, lane.getOverflowBehavior().name());
+                ps.setInt(10, lane.getId());
+                ps.executeUpdate();
+            }
+
+            replaceLanePositions(lane.getId(), "lane_chests", lane.getChestPositions());
+            replaceLanePositions(lane.getId(), "lane_inputs", lane.getInputPositions());
+            connection.commit();
+            return true;
+        } catch (SQLException e) {
+            LOGGER.error("Failed to update lane '{}'", lane.getName(), e);
+            rollback();
+            return false;
+        }
+    }
+
+    private void replaceLanePositions(int laneId, String table, List<BlockPos> positions)
+            throws SQLException {
+        try (PreparedStatement delete = connection.prepareStatement(
+                "DELETE FROM " + table + " WHERE lane_id=?")) {
+            delete.setInt(1, laneId);
+            delete.executeUpdate();
+        }
+        insertLanePositions(laneId, table, positions);
+    }
+
+    /** Load all persisted storage lanes. */
+    public List<StorageLane> loadAllLanes() {
+        List<StorageLane> lanes = new ArrayList<>();
+        if (!isOpen()) return lanes;
+        try (Statement stmt = connection.createStatement();
+             ResultSet rs = stmt.executeQuery(
+                     "SELECT id, name, item_id, frame_x, frame_y, frame_z, "
+                             + "front_face, deposit_mode, priority, overflow_behavior "
+                             + "FROM lane_config ORDER BY priority ASC, id ASC")) {
+            while (rs.next()) {
+                StorageLane lane = new StorageLane(rs.getString("name"));
+                lane.setId(rs.getInt("id"));
+                lane.setItemId(rs.getString("item_id"));
+                int fx = rs.getInt("frame_x");
+                if (!rs.wasNull()) {
+                    lane.setLabelFramePos(new BlockPos(fx, rs.getInt("frame_y"), rs.getInt("frame_z")));
+                }
+                String frontFace = rs.getString("front_face");
+                if (frontFace != null && !frontFace.isBlank()) {
+                    try {
+                        lane.setFrontFace(Direction.valueOf(frontFace));
+                    } catch (IllegalArgumentException ignored) {}
+                }
+                try {
+                    lane.setDepositMode(StorageLane.DepositMode.valueOf(rs.getString("deposit_mode")));
+                } catch (IllegalArgumentException ignored) {}
+                lane.setPriority(rs.getInt("priority"));
+                try {
+                    lane.setOverflowBehavior(StorageLane.OverflowBehavior.valueOf(rs.getString("overflow_behavior")));
+                } catch (IllegalArgumentException ignored) {}
+                lanes.add(lane);
+            }
+        } catch (SQLException e) {
+            LOGGER.error("Failed to load lanes", e);
+            return lanes;
+        }
+
+        // Load chest and input positions for each lane
+        for (StorageLane lane : lanes) {
+            loadLanePositions(lane, "lane_chests", false);
+            loadLanePositions(lane, "lane_inputs", true);
+        }
+        return lanes;
+    }
+
+    private void loadLanePositions(StorageLane lane, String table, boolean inputs) {
+        try (PreparedStatement ps = connection.prepareStatement(
+                "SELECT x, y, z FROM " + table
+                        + " WHERE lane_id=? ORDER BY seq ASC")) {
+            ps.setInt(1, lane.getId());
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    BlockPos pos = new BlockPos(rs.getInt("x"), rs.getInt("y"), rs.getInt("z"));
+                    if (inputs) lane.addInput(pos);
+                    else lane.addChest(pos);
+                }
+            }
+        } catch (SQLException e) {
+            LOGGER.error("Failed to load positions from {} for lane {}", table, lane.getId(), e);
+        }
+    }
+
+    /** Delete a single lane (cascades to lane_chests/lane_inputs). */
+    public boolean deleteLane(int laneId) {
+        if (!isOpen()) return false;
+        try {
+            // Manual cascade (SQLite FK enforcement may not be enabled by default)
+            try (PreparedStatement ps = connection.prepareStatement(
+                    "DELETE FROM lane_inputs WHERE lane_id=?")) {
+                ps.setInt(1, laneId);
+                ps.executeUpdate();
+            }
+            try (PreparedStatement ps = connection.prepareStatement(
+                    "DELETE FROM lane_chests WHERE lane_id=?")) {
+                ps.setInt(1, laneId);
+                ps.executeUpdate();
+            }
+            try (PreparedStatement ps = connection.prepareStatement(
+                    "DELETE FROM lane_config WHERE id=?")) {
+                ps.setInt(1, laneId);
+                int rows = ps.executeUpdate();
+                connection.commit();
+                return rows > 0;
+            }
+        } catch (SQLException e) {
+            LOGGER.error("Failed to delete lane id={}", laneId, e);
+            rollback();
+            return false;
+        }
+    }
+
+    /** Delete all persisted storage lanes. */
+    public void clearAllLanes() {
+        if (!isOpen()) return;
+        try (Statement stmt = connection.createStatement()) {
+            stmt.executeUpdate("DELETE FROM lane_inputs");
+            stmt.executeUpdate("DELETE FROM lane_chests");
+            stmt.executeUpdate("DELETE FROM lane_config");
+            connection.commit();
+        } catch (SQLException e) {
+            LOGGER.error("Failed to clear all lanes", e);
+            rollback();
         }
     }
 
