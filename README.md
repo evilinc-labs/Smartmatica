@@ -1,6 +1,6 @@
 # MOAR : Minecraft Orchestrated Automation & Response
 
-[![Downloads](https://img.shields.io/github/downloads/evilinc-labs/MOAR/total.svg
+[![Downloads](https://img.shields.io/github/downloads/evilinc-labs/MOAR/total.svg)
 
 A client-side Fabric mod that automates schematic building, spawn-proofing, and container management. Load a `.litematic`, point it at some supply chests, and let it build, restock, recover from disconnects, and keep working across long multi-container runs.
 
